@@ -52,6 +52,7 @@ skills/.hub/
 dreamer/
 hermes-cs/
 cron/.tick.lock
+plugins/
 .hermes_history
 .skills_prompt_snapshot.json
 models_dev_cache.json
