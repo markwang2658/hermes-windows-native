@@ -52,6 +52,14 @@ skills/.hub/
 dreamer/
 hermes-cs/
 cron/.tick.lock
+.hermes_history
+.skills_prompt_snapshot.json
+models_dev_cache.json
+
+# === 临时/调试文件 ==
+*.log
+_tirith-*
+interrupt_debug.log
 
 # === OS 文件 ==
 .DS_Store
