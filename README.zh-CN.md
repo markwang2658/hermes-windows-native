@@ -8,7 +8,7 @@
 [![No Docker](https://img.shields.io/badge/No-Docker-brightgreen.svg)](https://github.com/markwang2658/hermes-windows-native)
 [![No WSL2](https://img.shields.io/badge/No-WSL2-brightgreen.svg)](https://github.com/markwang2658/hermes-windows-native)
 
-## 🖥️ 在 **你的** Windows 上运行的 AI 智能体 — 无需虚拟机、无需容器、无需折腾。
+## 🖥️ 在你的 Windows 原生运行的 AI 智能体 — No Docker · No WSL2
 
 > **Hermes Agent + WebUI。原生 Windows。零开销。**
 
