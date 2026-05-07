@@ -4,7 +4,7 @@
 [![No Docker](https://img.shields.io/badge/No-Docker-brightgreen.svg)](https://github.com/markwang2658/hermes-windows-native)
 [![No WSL2](https://img.shields.io/badge/No-WSL2-brightgreen.svg)](https://github.com/markwang2658/hermes-windows-native)
 
-# ☤ Hermes Windows Native
+# 🚀 Hermes Windows Native
 
 **[🇨🇳 中文](README.zh-CN.md) | English**
 
