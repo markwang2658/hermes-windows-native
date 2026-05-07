@@ -55,7 +55,7 @@ cd hermes-windows-native
 .\start.ps1
 ```
 
-然后在浏览器中打开 http://127.0.0.1:8787。
+然后在浏览器中打开 http://127.0.0.1:8787
 
 🎉 就这样。**不用 Docker。不用 WSL2。不用折腾配置。**
 
