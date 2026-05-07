@@ -6,6 +6,8 @@
 
 # ☤ Hermes Windows Native
 
+**[🇨🇳 中文](README.zh-CN.md) | English**
+
 ## 🖥️ The AI Agent that runs on **YOUR** Windows — no VM, no container, no hassle.
 
 > **Hermes Agent + WebUI. Native Windows. Zero overhead.**
