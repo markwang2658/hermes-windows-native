@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="assets/banner.png" alt="Hermes Windows Native Banner" width="800">
-</p>
-
 # 🚀 Hermes Windows Native
 
 **[🇨🇳 中文](README.zh-CN.md) | English**
