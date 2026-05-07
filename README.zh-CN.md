@@ -1,22 +1,20 @@
+<p align="center">
+  <img src="assets/banner.png" alt="Hermes Windows Native 横幅" width="800">
+</p>
+
+# 🚀 Hermes Windows Native
+
+**[English](README.md) | 🇨🇳 中文**
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![Platform: Windows](https://img.shields.io/badge/Platform-Windows%20%7C%2010%2B-blue.svg)]
 [![No Docker](https://img.shields.io/badge/No-Docker-brightgreen.svg)](https://github.com/markwang2658/hermes-windows-native)
 [![No WSL2](https://img.shields.io/badge/No-WSL2-brightgreen.svg)](https://github.com/markwang2658/hermes-windows-native)
 
-# 🚀 Hermes Windows Native
-
-**[English](README.md) | 🇨🇳 中文**
-
 ## 🖥️ 在 **你的** Windows 上运行的 AI 智能体 — 无需虚拟机、无需容器、无需折腾。
 
 > **Hermes Agent + WebUI。原生 Windows。零开销。**
-
-[⭐ 如果今天省下了内存，请 Star 本项目 →](https://github.com/markwang2658/hermes-windows-native/stargazers)
-
-<p align="center">
-  <img src="assets/banner.png" alt="Hermes Windows Native 横幅" width="800">
-</p>
 
 ---
 
