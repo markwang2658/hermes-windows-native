@@ -1,0 +1,10 @@
+20:27:38 ENTER: queued interrupt msg='hermes setup', agent_running=True
+pt=True
+20:29:08 ENTER: queued interrupt msg='你好 , 请执行 hermes setup ,我重新 更换一个模型', agent_running=True
+20:29:08 interrupt fired: msg='你好 , 请执行 hermes setup ,我重新 更换一个模型', children=0, parent._interrupt=True
+20:30:42 ENTER: queued interrupt msg='你好', agent_running=True
+20:30:42 interrupt fired: msg='你好', children=0, parent._interrupt=True
+22:57:03 interrupt fired: msg='请加载 utility skill，然后告诉我 CPU 使用率', children=0, parent._interrupt=True
+22:57:03 ENTER: queued interrupt msg='请加载 utility skill，然后告诉我 CPU 使用率', agent_running=True
+23:23:00 interrupt fired: msg='你好', children=0, parent._interrupt=True
+23:23:00 ENTER: queued interrupt msg='你好', agent_running=True

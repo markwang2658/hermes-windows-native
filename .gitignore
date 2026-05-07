@@ -1,0 +1,65 @@
+# === 敏感信息（绝对不提交）===
+.env
+.env.*
+!.env.example
+!.env.docker.example
+auth.json
+auth.lock
+channel_directory.json
+config.yaml
+
+# === 运行时状态（每个用户不同）===
+state.db
+state.db-shm
+state.db-wal
+kanban.db
+gateway_state.json
+processes.json
+webui-state/
+sessions/
+logs/
+cache/
+
+# === 测试文件（上游已有，Windows 跑不通，省体积）==
+tests/
+
+# === Python 缓存 ==
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+
+# === Node.js（如存在）==
+node_modules/
+
+# === AI 工具配置（个人专属）==
+.claude/
+.cursorrules
+.windsurfrules
+.aider*
+copilot-instructions.md
+CLAUDE.md
+AGENTS.md
+SOUL.md
+.trae/
+
+# === 用户数据 ==
+memories/
+skills/.hub/
+dreamer/
+hermes-cs/
+cron/.tick.lock
+
+# === OS 文件 ==
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.bak
+
+# === CUDA/模型 ==
+.cuda-lib/
+checkpoints/
