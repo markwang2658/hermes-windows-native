@@ -14,6 +14,10 @@
 
 [⭐ 如果今天省下了内存，请 Star 本项目 →](https://github.com/markwang2658/hermes-windows-native/stargazers)
 
+<p align="center">
+  <img src="assets/banner.png" alt="Hermes Windows Native 横幅" width="800">
+</p>
+
 ---
 
 ## 🎯 为什么选择 Windows 原生版？

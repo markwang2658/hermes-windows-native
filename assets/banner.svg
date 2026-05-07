@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 200" width="800" height="200">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#F5C842"/>
+      <stop offset="100%" style="stop-color:#E8A820"/>
+    </linearGradient>
+    <filter id="shadow" x="-2%" y="-2%" width="104%" height="104%">
+      <feDropShadow dx="1" dy="2" stdDeviation="2" flood-opacity="0.15"/>
+    </filter>
+  </defs>
+  
+  <rect width="800" height="200" rx="12" fill="url(#bg)"/>
+  
+  <!-- Rocket Icon -->
+  <g transform="translate(60, 60)" filter="url(#shadow)">
+    <path d="M35 0 C35 0 50 25 50 45 L65 55 L65 70 L50 62 C48 75 40 85 30 90 C32 80 28 72 22 68 L10 78 L10 63 L22 53 C18 38 18 18 35 0Z" fill="#E67E22" stroke="#D35400" stroke-width="1.5"/>
+    <circle cx="26" cy="36" r="4" fill="#FFF" opacity="0.9"/>
+    <ellipse cx="16" cy="66" rx="6" ry="3" fill="#E74C3C" opacity="0.7"/>
+    <ellipse cx="54" cy="58" rx="6" ry="3" fill="#E74C3C" opacity="0.7"/>
+    <path d="M10 78 Q5 88 12 92" fill="none" stroke="#F39C12" stroke-width="2.5" stroke-linecap="round" opacity="0.6"/>
+    <path d="M65 55 Q73 52 76 58" fill="none" stroke="#F39C12" stroke-width="2.5" stroke-linecap="round" opacity="0.6"/>
+  </g>
+
+  <!-- Main Title -->
+  <text x="145" y="95" font-family="'Segoe UI', Arial, sans-serif" font-size="52" font-weight="900" fill="#2C3E50" letter-spacing="3">
+    HERMES WINDOWS NATIVE
+  </text>
+  
+  <!-- Subtitle -->
+  <text x="145" y="140" font-family="'Segoe UI', Arial, sans-serif" font-size="22" fill="#5D4E37" font-weight="600" letter-spacing="1.5">
+    No Docker  ·  No WSL2  ·  Pure Windows Native
+  </text>
+  
+  <!-- Decorative dots -->
+  <circle cx="140" cy="135" r="3" fill="#D35400" opacity="0.5"/>
+  <circle cx="560" cy="135" r="3" fill="#D35400" opacity="0.5"/>
+</svg>

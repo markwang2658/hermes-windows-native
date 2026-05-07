@@ -14,6 +14,10 @@
 
 [⭐ **Star** this repo if you saved RAM today →](https://github.com/markwang2658/hermes-windows-native/stargazers)
 
+<p align="center">
+  <img src="assets/banner.png" alt="Hermes Windows Native Banner" width="800">
+</p>
+
 ---
 
 ## 🎯 Why Windows Native?
