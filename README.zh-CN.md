@@ -135,7 +135,7 @@ hermes-windows-native/
 | 端口 8787 已被占用 | `.\start.ps1 -Port 8788` |
 | 模块导入错误 | 重新运行 `.\install.ps1` |
 | 未检测到 Agent | 在 `start.ps1` 中手动设置 `$env:HERMES_WEBUI_AGENT_DIR` |
-| Push 超时失败 | 先执行 `git config --local http.proxy http://127.0.0.1:10808` 再重试 |
+| Push 超时失败 | 检查网络代理设置，或稍后重试 |
 
 ---
 

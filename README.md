@@ -135,7 +135,7 @@ Running on a machine with **8GB RAM**:
 | Port 8787 already in use | `.\start.ps1 -Port 8788` |
 | Module import errors | Re-run `.\install.ps1` |
 | Agent not detected | Set `$env:HERMES_WEBUI_AGENT_DIR` manually in `start.ps1` |
-| Push fails with timeout | `git config --local http.proxy http://127.0.0.1:10808` then retry |
+| Push fails with timeout | Check your network proxy settings, or try again later |
 
 ---
 
