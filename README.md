@@ -73,6 +73,10 @@ Then open http://127.0.0.1:8787 in your browser.
 - **Self-Improving Skills** — creates, tests, and refines its own tools automatically
 - **Tool Ecosystem** — browser automation, terminal access, file editing, web search, code execution...
 
+![Hermes Agent Startup Interface](screenshots/hermes-agent-start.png)
+
+*Figure: Hermes Agent terminal startup — auto-loading skills, connecting to model gateway, ready to serve*
+
 ### 🌐 Web UI (from [nesquena/hermes-webui](https://github.com/nesquena/hermes-webui))
 
 - **Full Chat Interface** — conversation history, streaming responses, markdown rendering

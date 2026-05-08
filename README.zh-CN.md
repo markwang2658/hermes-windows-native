@@ -73,6 +73,10 @@ cd hermes-windows-native
 - **自进化技能** — 自动创建、测试和优化自己的工具集
 - **工具生态** — 浏览器自动化、终端操作、文件编辑、网页搜索、代码执行...
 
+![Hermes Agent 启动界面](screenshots/hermes-agent-start.png)
+
+*图：Hermes Agent 终端启动 — 自动加载技能、连接模型网关、就绪待命*
+
 ### 🌐 Web 界面（来自 [nesquena/hermes-webui](https://github.com/nesquena/hermes-webui)）
 
 - **完整聊天界面** — 对话历史、流式响应、Markdown 渲染
