@@ -57,6 +57,10 @@ Then open http://127.0.0.1:8787 in your browser.
 
 🎉 That's it. **No Docker. No WSL2. No configuration hell.**
 
+![3-Step Quick Start Demo](screenshots/quick-start.gif)
+
+*Figure: Clone → Install → Start — up and running in under 3 minutes*
+
 ---
 
 ## ✨ Features
@@ -77,6 +81,10 @@ Then open http://127.0.0.1:8787 in your browser.
 - **7 Color Themes** — Dark, Light, Nord, Monokai, OLED, Solarized...
 - **Settings Panel** — model selection, provider config, theme switcher
 
+![Hermes WebUI Interface](screenshots/hermes-webui-start.png)
+
+*Figure: Hermes WebUI three-panel layout — session list, chat area, workspace browser*
+
 ### 🖥️ Windows Native Advantages (this project)
 
 - **One-Click Install** — `install.ps1` handles everything (no manual venv, no pip fighting)
@@ -85,7 +93,17 @@ Then open http://127.0.0.1:8787 in your browser.
 - **Low Resource Usage** — ~330MB total on 8GB machine (vs ~1080MB with WSL2)
 - **PowerShell Native** — all scripts in `.ps1`, no bash/shell hacks
 
+![Live Chat Demo](screenshots/demo-chat.png)
+
+*Figure: Hermes Agent live chat — streaming responses, markdown rendering, multi-turn context*
+
 ---
+
+## 🏗️ Architecture
+
+![Four-Mode Routing Architecture](screenshots/architecture-en.png)
+
+*Figure: Hermes automatically routes input to the best AI model based on type (chat/vision/audio/text)*
 
 ## 📁 Project Structure
 
@@ -113,6 +131,16 @@ Running on a machine with **8GB RAM**:
 | **Total** | **~580 MB** | **~1080 MB** | **~330 MB** |
 
 > **You save ~250MB vs Docker, ~750MB vs WSL2.** On a 8GB machine, that matters.
+
+---
+
+## 🤖 Local Model Inference
+
+![LM Studio — Local Model Loading](screenshots/lm-studio-loading.png)
+
+*Figure: LM Studio interface — search, download, and run local AI models (GLM-4.6V for vision/text)*
+
+> **Privacy-first**: Images, audio, and files are processed locally on your machine. Data never leaves.
 
 ---
 
