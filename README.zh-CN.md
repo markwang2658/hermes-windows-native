@@ -57,6 +57,10 @@ cd hermes-windows-native
 
 🎉 就这样。**不用 Docker。不用 WSL2。不用折腾配置。**
 
+![3 步快速启动演示](screenshots/quick-start.gif)
+
+*图：克隆 → 安装 → 启动 — 3 分钟内即可运行*
+
 ---
 
 ## ✨ 功能特性
@@ -77,6 +81,10 @@ cd hermes-windows-native
 - **7 种主题配色** — Dark、Light、Nord、Monokai、OLED、Solarized...
 - **设置面板** — 模型选择、供应商配置、主题切换
 
+![Hermes WebUI 界面](screenshots/hermes-webui-start.png)
+
+*图：Hermes WebUI 三栏布局 — 会话列表、聊天区域、工作区浏览器*
+
 ### 🖥️ Windows 原生优势（本项目独有）
 
 - **一键安装** — `install.ps1` 全自动处理（不用手动建 venv、不用跟 pip 打架）
@@ -85,7 +93,17 @@ cd hermes-windows-native
 - **低资源占用** — 8GB 内存机器上仅占 ~330MB（WSL2 方案则需 ~1080MB）
 - **PowerShell 原生** — 所有脚本均为 `.ps1`，无需 bash/shell 兼容 hack
 
+![实时聊天演示](screenshots/demo-chat.png)
+
+*图：Hermes Agent 实时对话 — 流式响应、Markdown 渲染、多轮上下文*
+
 ---
+
+## 🏗️ 系统架构
+
+![四种模式分流架构图](screenshots/architecture-zh.png)
+
+*图：Hermes 根据输入类型（聊天/图片/语音/文本）自动路由到最佳 AI 模型*
 
 ## 📁 项目结构
 
@@ -113,6 +131,16 @@ hermes-windows-native/
 | **总计** | **~580 MB** | **~1080 MB** | **~330 MB** |
 
 > **比 Docker 省约 250MB，比 WSL2 省约 750MB。** 在 8GB 机器上，这很重要。
+
+---
+
+## 🤖 本地模型推理
+
+![LM Studio — 本地模型加载](screenshots/lm-studio-loading.png)
+
+*图：LM Studio 界面 — 搜索、下载并运行本地 AI 模型（GLM-4.6V 用于图片/文本理解）*
+
+> **隐私优先**：图片、语音和文件均在你的本地机器上处理，数据不会外传。
 
 ---
 
