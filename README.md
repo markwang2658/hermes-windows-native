@@ -63,6 +63,14 @@ Then open http://127.0.0.1:8787 in your browser.
 
 ---
 
+## 🏗️ Architecture
+
+![Four-Mode Routing Architecture](screenshots/architecture-en.png)
+
+*Figure: Hermes automatically routes input to the best AI model based on type (chat/vision/audio/text)*
+
+---
+
 ## ✨ Features
 
 ### 🧠 AI Agent Core (from [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent))
@@ -102,12 +110,6 @@ Then open http://127.0.0.1:8787 in your browser.
 *Figure: Hermes Agent live chat — streaming responses, markdown rendering, multi-turn context*
 
 ---
-
-## 🏗️ Architecture
-
-![Four-Mode Routing Architecture](screenshots/architecture-en.png)
-
-*Figure: Hermes automatically routes input to the best AI model based on type (chat/vision/audio/text)*
 
 ## 📁 Project Structure
 

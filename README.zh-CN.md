@@ -63,6 +63,14 @@ cd hermes-windows-native
 
 ---
 
+## 🏗️ 系统架构
+
+![四种模式分流架构图](screenshots/architecture-zh.png)
+
+*图：Hermes 根据输入类型（聊天/图片/语音/文本）自动路由到最佳 AI 模型*
+
+---
+
 ## ✨ 功能特性
 
 ### 🧠 AI 智能体核心（来自 [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)）
@@ -102,12 +110,6 @@ cd hermes-windows-native
 *图：Hermes Agent 实时对话 — 流式响应、Markdown 渲染、多轮上下文*
 
 ---
-
-## 🏗️ 系统架构
-
-![四种模式分流架构图](screenshots/architecture-zh.png)
-
-*图：Hermes 根据输入类型（聊天/图片/语音/文本）自动路由到最佳 AI 模型*
 
 ## 📁 项目结构
 
