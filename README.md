@@ -16,6 +16,12 @@ This repository is designed for users who want a practical Windows setup without
 - `hermes-start`
 - one shared `.venv`
 
+## Integrated Versions
+
+- Hermes Agent package version: `0.16.0`
+- Hermes Agent source version: `v2026.6.5`
+- Hermes WebUI source version: `v0.51.454`
+
 ## Why This Repo Exists
 
 The upstream projects document their own components separately. This repository focuses on the Windows-native integration layer:
