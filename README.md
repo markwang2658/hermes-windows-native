@@ -44,6 +44,16 @@ If your goal is to get Hermes Agent and Hermes WebUI running together on Windows
 - Runtime data redirected to `%USERPROFILE%\.hermes` instead of polluting the source tree
 - Practical documentation split into installation and quick-start guides
 
+## Startup Screenshots
+
+Hermes Agent startup:
+
+![Hermes Agent Start](./hermes-guide/images/readme/hermes-agent-start.png)
+
+Hermes WebUI startup:
+
+![Hermes WebUI Start](./hermes-guide/images/readme/hermes-webui-start.png)
+
 ## Repository Layout
 
 ```text
