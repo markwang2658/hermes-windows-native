@@ -13,9 +13,9 @@
 
 ## 整合版本
 
-- Hermes Agent 包版本：`0.17.0`
-- Hermes Agent 源码版本：`v2026.06.19`
-- Hermes WebUI 源码版本：`v0.51.528`
+- Hermes Agent 包版本：`0.16.0`
+- Hermes Agent 源码版本：`v2026.6.5`
+- Hermes WebUI 源码版本：`v0.51.454`
 
 ## 文档内容
 
