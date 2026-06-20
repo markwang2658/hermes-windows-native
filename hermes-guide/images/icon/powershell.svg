@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="132" height="32" viewBox="0 0 132 32" role="img" aria-label="PowerShell">
+  <rect width="132" height="32" rx="8" fill="#0f172a"/>
+  <rect x="10" y="7" width="16" height="18" rx="3" fill="#5391fe"/>
+  <path d="M14 12l4 3-4 3" fill="none" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="19" y1="19" x2="23" y2="19" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round"/>
+  <text x="34" y="21" font-family="Segoe UI, Arial, sans-serif" font-size="13" fill="#ffffff">PowerShell</text>
+</svg>
