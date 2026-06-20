@@ -1,9 +1,9 @@
 # Hermes Agent Windows Native
 
-[![Windows Native](https://raw.githubusercontent.com/markwang2658/hermes-windows-native-guide/main/images/icon/windows-native.svg)](https://github.com/markwang2658/hermes-windows-native-guide)
-[![Python 3.11+](https://raw.githubusercontent.com/markwang2658/hermes-windows-native-guide/main/images/icon/python-311.svg)](https://github.com/markwang2658/hermes-windows-native-guide)
-[![PowerShell](https://raw.githubusercontent.com/markwang2658/hermes-windows-native-guide/main/images/icon/powershell.svg)](https://github.com/markwang2658/hermes-windows-native-guide)
-[![Guide](https://raw.githubusercontent.com/markwang2658/hermes-windows-native-guide/main/images/icon/guide.svg)](https://github.com/markwang2658/hermes-windows-native-guide)
+[![Windows Native](./hermes-guide/images/icon/windows-native.svg)](./hermes-guide/README.md)
+[![Python 3.11+](./hermes-guide/images/icon/python-311.svg)](./hermes-guide/README.md)
+[![PowerShell](./hermes-guide/images/icon/powershell.svg)](./hermes-guide/README.md)
+[![Guide](./hermes-guide/images/icon/guide.svg)](./hermes-guide/README.md)
 
 English | [简体中文](./README-zh-CN.md)
 
@@ -179,18 +179,16 @@ At the time of testing, only these two free models were confirmed to work in the
 
 ## Documentation
 
-Detailed documentation is maintained in the dedicated guide repository:
-
-- Guide repository: [markwang2658/hermes-windows-native-guide](https://github.com/markwang2658/hermes-windows-native-guide)
+Detailed documentation is maintained in `hermes-guide/` inside this repository:
 
 Guide entry points:
 
-- English homepage: [README](https://github.com/markwang2658/hermes-windows-native-guide/blob/main/README.md)
-- Simplified Chinese homepage: [README.zh-CN.md](https://github.com/markwang2658/hermes-windows-native-guide/blob/main/README.zh-CN.md)
-- Installation guide: [EN/installation.md](https://github.com/markwang2658/hermes-windows-native-guide/blob/main/EN/installation.md)
-- Quick start guide: [EN/quick-start.md](https://github.com/markwang2658/hermes-windows-native-guide/blob/main/EN/quick-start.md)
-- Chinese installation guide: [zh-CN/installation.md](https://github.com/markwang2658/hermes-windows-native-guide/blob/main/zh-CN/installation.md)
-- Chinese quick start guide: [zh-CN/quick-start.md](https://github.com/markwang2658/hermes-windows-native-guide/blob/main/zh-CN/quick-start.md)
+- English homepage: [README](./hermes-guide/README.md)
+- Simplified Chinese homepage: [README.zh-CN.md](./hermes-guide/README.zh-CN.md)
+- Installation guide: [EN/installation.md](./hermes-guide/EN/installation.md)
+- Quick start guide: [EN/quick-start.md](./hermes-guide/EN/quick-start.md)
+- Chinese installation guide: [zh-CN/installation.md](./hermes-guide/zh-CN/installation.md)
+- Chinese quick start guide: [zh-CN/quick-start.md](./hermes-guide/zh-CN/quick-start.md)
 
 ## Constraints
 
