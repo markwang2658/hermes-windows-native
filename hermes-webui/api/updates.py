@@ -651,9 +651,17 @@ def _check_repo(path, name):
     tag used to silently report "Up to date" with no remediation affordance, so
     the Settings panel reads this flag to offer ``apply_force_update`` (issue
     #4085).
+
+    When ``.git`` is absent (Docker images, pip installs), returns a minimal dict
+    with ``no_git: True`` and ``behind: None`` so the frontend can distinguish
+    "can't check" from "up to date" (issue #4356).
     """
     if path is None or not (path / '.git').exists():
-        return None
+        return {
+            'name': name,
+            'behind': None,
+            'no_git': True,
+        }
 
     # Fetch tags first so update prompts track published releases, not every
     # development commit that lands on master/main after the latest release.
@@ -1234,8 +1242,15 @@ def apply_force_update(target: str) -> dict:
 
         compare_ref = _select_apply_compare_ref(path)
 
-        # Discard local modifications then reset to remote HEAD
+        # Discard local modifications and untracked colliders before resetting.
+        # Do not use -x: ignored build/cache artifacts should survive force update.
         _run_git(['checkout', '.'], path)
+        _, clean_ok = _run_git(['clean', '-fd'], path)
+        if not clean_ok:
+            return {
+                'ok': False,
+                'message': 'Failed to remove untracked files before force reset',
+            }
         _, ok = _run_git(['reset', '--hard', compare_ref], path)
         if not ok:
             return {'ok': False, 'message': f'Force reset to {compare_ref} failed'}
@@ -1335,6 +1350,9 @@ def _apply_update_inner(target):
     if not pull_ok:
         pull_lower = pull_out.lower()
         detail = pull_out.strip()[:300] if pull_out.strip() else '(no output from git)'
+        untracked_collision = (
+            'untracked working tree files would be overwritten' in pull_lower
+        )
         diverged_failure = (
             'not possible to fast-forward' in pull_lower or 'diverged' in pull_lower
         )
@@ -1428,7 +1446,10 @@ def _apply_update_inner(target):
         message_parts = [f'Pull failed: {detail}']
         if restored_note:
             message_parts.append(restored_note)
-        return {'ok': False, 'message': ' '.join(message_parts)}
+        response = {'ok': False, 'message': ' '.join(message_parts)}
+        if untracked_collision:
+            response['conflict'] = True
+        return response
 
     # Re-apply stash if we stashed.
     stash_drop_failed = False

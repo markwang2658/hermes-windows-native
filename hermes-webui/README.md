@@ -337,16 +337,18 @@ Full list of environment variables:
 | `HERMES_WEBUI_PYTHON` | auto-discovered | Python executable |
 | `HERMES_WEBUI_HOST` | `127.0.0.1` | Bind address (`0.0.0.0` for all IPv4, `::` for all IPv6, `::1` for IPv6 loopback) |
 | `HERMES_WEBUI_PORT` | `8787` | Port |
-| `HERMES_WEBUI_STATE_DIR` | `$HERMES_HOME/webui` (Windows default `%LOCALAPPDATA%\hermes\webui`, POSIX default `~/.hermes/webui`) | Where sessions and state are stored |
+| `HERMES_WEBUI_STATE_DIR` | `$HERMES_HOME/webui` (Windows default `%LOCALAPPDATA%\hermes\webui`, POSIX default `~/.hermes/webui`) | Where sessions and state are stored. **Note (upgrade):** the default now follows `HERMES_HOME` — if you previously relocated `HERMES_HOME` to a non-default base **without** setting `HERMES_WEBUI_STATE_DIR`, your WebUI state now resolves to `$HERMES_HOME/webui` instead of the old platform-default `~/.hermes/webui`. To keep using the old location, set `HERMES_WEBUI_STATE_DIR` to it (or move the directory). Installs with `HERMES_HOME` unset or at the default base are unaffected. |
 | `HERMES_WEBUI_DEFAULT_WORKSPACE` | `~/workspace` | Default workspace |
 | `HERMES_WEBUI_DEFAULT_MODEL` | *(provider default)* | Optional model override; leave unset to use the active Hermes provider default |
 | `HERMES_WEBUI_PASSWORD` | *(unset)* | Set to enable password authentication |
 | `HERMES_WEBUI_CSP_CONNECT_EXTRA` | *(unset)* | Optional space-separated `http(s)://` or `ws(s)://` origins to append to the report-only CSP `connect-src` directive for reverse-proxy or tunnel deployments |
+| `HERMES_WEBUI_SSE_CHUNKED` | *(unset)* | Set truthy (`1`/`true`/`yes`/`on`) to send SSE with `Transfer-Encoding: chunked`. Needed behind buffering reverse proxies (e.g. `jupyter-server-proxy`) that otherwise buffer the whole stream; harmless but unnecessary for directly-served deployments |
 | `HERMES_WEBUI_EXTENSION_DIR` | *(unset)* | Optional local directory served at `/extensions/`; must point to an existing directory before extension injection is enabled |
 | `HERMES_WEBUI_EXTENSION_SCRIPT_URLS` | *(unset)* | Optional comma-separated same-origin script URLs to inject; see [WebUI Extensions](docs/EXTENSIONS.md) |
 | `HERMES_WEBUI_EXTENSION_STYLESHEET_URLS` | *(unset)* | Optional comma-separated same-origin stylesheet URLs to inject; see [WebUI Extensions](docs/EXTENSIONS.md) |
 | `HERMES_HOME` | Windows: `%LOCALAPPDATA%\hermes`; POSIX: `~/.hermes` | Base directory for Hermes state (affects all paths) |
 | `HERMES_CONFIG_PATH` | `$HERMES_HOME/config.yaml` | Path to Hermes config file |
+| `HERMES_WEBUI_SERVER_CWD` | *(unset)* | Working directory for the server process. Defaults to the agent dir; point it at a writable workspace when the agent dir is read-only so fallback relative writes land somewhere writable |
 | `HERMES_WEBUI_AGENT_CACHE_MAX` | `25` | Max live agent instances kept warm in the in-memory LRU. Each pins a full conversation transcript, so this is the dominant lever on resident memory — lower it on installs with many long sessions to cap RAM (at the cost of more cold reloads) |
 | `HERMES_WEBUI_SESSIONS_MAX` | `100` | Max compact `Session` objects held in the in-memory LRU. Lighter than the agent cache; lower it on installs with hundreds of sessions |
 
@@ -618,24 +620,24 @@ The WebUI is still coupled to Hermes Agent internals for runtime execution, prov
 Hermes WebUI is built with help from the open-source community. Every PR — whether merged directly, absorbed into a batch release, or salvaged from a larger proposal — shapes the project, and we're grateful to everyone who has taken the time to contribute.
 
 <!-- BEGIN GENERATED CONTRIBUTORS -->
-Over **248 contributors** have shipped code that landed in a release tag. The full, continuously-updated credit roll — including everyone with one or two PRs and the special-thanks roll for design and architectural work — lives in [`CONTRIBUTORS.md`](CONTRIBUTORS.md). A snapshot of the most prolific contributors:
+Over **280 contributors** have shipped code that landed in a release tag. The full, continuously-updated credit roll — including everyone with one or two PRs and the special-thanks roll for design and architectural work — lives in [`CONTRIBUTORS.md`](CONTRIBUTORS.md). A snapshot of the most prolific contributors:
 
 ### Top contributors (by PR count, including absorbed/batch-released work)
 
 | # | Contributor | PRs | First → latest release |
 |---|---|---:|---|
-| 1 | [@franksong2702](https://github.com/franksong2702) | 181 | `v0.49.3` → `v0.51.384` |
-| 2 | [@Michaelyklam](https://github.com/Michaelyklam) | 118 | `v0.50.240` → `v0.51.198` |
-| 3 | [@rodboev](https://github.com/rodboev) | 83 | `v0.51.223` → `v0.51.384` |
-| 4 | [@ai-ag2026](https://github.com/ai-ag2026) | 75 | `v0.50.279` → `v0.51.367` |
-| 5 | [@bergeouss](https://github.com/bergeouss) | 70 | `v0.48.0` → `v0.51.385` |
-| 6 | [@AJV20](https://github.com/AJV20) | 34 | `v0.51.93` → `v0.51.227` |
-| 7 | [@dso2ng](https://github.com/dso2ng) | 30 | `v0.50.227` → `v0.51.327` |
-| 8 | [@starship-s](https://github.com/starship-s) | 19 | `v0.50.123` → `v0.51.153` |
-| 9 | [@jasonjcwu](https://github.com/jasonjcwu) | 16 | `v0.50.227` → `v0.51.235` |
-| 10 | [@dobby-d-elf](https://github.com/dobby-d-elf) | 15 | `v0.51.38` → `v0.51.161` |
+| 1 | [@franksong2702](https://github.com/franksong2702) | 244 | `v0.49.3` → `v0.51.492` |
+| 2 | [@rodboev](https://github.com/rodboev) | 189 | `v0.51.223` → `v0.51.511` |
+| 3 | [@Michaelyklam](https://github.com/Michaelyklam) | 157 | `v0.50.240` → `v0.51.198` |
+| 4 | [@ai-ag2026](https://github.com/ai-ag2026) | 115 | `v0.50.279` → `v0.51.482` |
+| 5 | [@bergeouss](https://github.com/bergeouss) | 77 | `v0.48.0` → `v0.51.505` |
+| 6 | [@AJV20](https://github.com/AJV20) | 57 | `v0.51.93` → `v0.51.346` |
+| 7 | [@dso2ng](https://github.com/dso2ng) | 41 | `v0.50.227` → `v0.51.488` |
+| 8 | [@Sanjays2402](https://github.com/Sanjays2402) | 26 | `v0.50.292` → `v0.51.484` |
+| 9 | [@starship-s](https://github.com/starship-s) | 23 | `v0.50.123` → `v0.51.473` |
+| 10 | [@Hinotoi-agent](https://github.com/Hinotoi-agent) | 21 | `v0.50.10` → `v0.51.497` |
 
-See [`CONTRIBUTORS.md`](CONTRIBUTORS.md) for the full ranked list of all 248 contributors — the 3+ PR tables, the 1–2 PR roll, and the special-thanks notes for design and architectural contributions.
+See [`CONTRIBUTORS.md`](CONTRIBUTORS.md) for the full ranked list of all 280 contributors — the 3+ PR tables, the 1–2 PR roll, and the special-thanks notes for design and architectural contributions.
 <!-- END GENERATED CONTRIBUTORS -->
 
 ### Notable contributions

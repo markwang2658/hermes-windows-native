@@ -1,24 +1,17 @@
-function isAbortError(err){
-  return !!(
-    err&&(
-      err.name==='AbortError'||
-      err.code===20||
-      err.abort===true
-    )
-  );
-}
-if(typeof window!=='undefined') window.isAbortError=isAbortError;
-
 async function api(path,opts={}){
   // Strip leading slash so URL resolves relative to location.href (supports subpath mounts)
   const rel = path.startsWith('/') ? path.slice(1) : path;
   const url=new URL(rel,document.baseURI||location.href);
   const timeoutMs=Object.prototype.hasOwnProperty.call(opts,'timeoutMs')?opts.timeoutMs:30000;
   const timeoutToast=opts.timeoutToast!==false;
+  const maxAttempts=Object.prototype.hasOwnProperty.call(opts,'retries')?Math.max(0,Number(opts.retries)||0)+1:3;
+  const retryTimeouts=opts.retryTimeouts===true;
+  const retryStatuses=Array.isArray(opts.retryStatuses)?opts.retryStatuses.map(Number).filter(Number.isFinite):[];
+  const retryDelayMs=Object.prototype.hasOwnProperty.call(opts,'retryDelayMs')?Math.max(0,Number(opts.retryDelayMs)||0):350;
   // Retry up to 2 times on network errors (e.g. stale keep-alive after long idle).
-  // Server errors (4xx/5xx) and client-side timeouts are NOT retried.
+  // Callers may opt into retrying timeouts / transient server statuses for idempotent GETs.
   let lastErr;
-  for(let attempt=0;attempt<3;attempt++){
+  for(let attempt=0;attempt<maxAttempts;attempt++){
     let controller=null;
     let timeoutId=null;
     let didTimeout=false;
@@ -28,6 +21,10 @@ async function api(path,opts={}){
       const fetchOpts={...opts};
       delete fetchOpts.timeoutMs;
       delete fetchOpts.timeoutToast;
+      delete fetchOpts.retries;
+      delete fetchOpts.retryTimeouts;
+      delete fetchOpts.retryStatuses;
+      delete fetchOpts.retryDelayMs;
 
       const useTimeout=Number.isFinite(Number(timeoutMs))&&Number(timeoutMs)>0;
       if(useTimeout&&typeof AbortController!=='undefined'){
@@ -80,20 +77,23 @@ async function api(path,opts={}){
       lastErr=e;
       const isTimeout=didTimeout||(e&&(e.timeout===true||e.name==='TimeoutError'));
       if(isTimeout){
+        if(retryTimeouts&&attempt<2&&attempt<maxAttempts-1){
+          if(retryDelayMs) await new Promise(resolve=>setTimeout(resolve,retryDelayMs*Math.pow(2,attempt)));
+          continue;
+        }
         const err=(e&&e.name==='TimeoutError')?e:new Error('Request timed out. Please try again.');
         err.name='TimeoutError';
         err.timeout=true;
         if(timeoutToast&&typeof showToast==='function') showToast('Request timed out. Please try again.',5000,'error');
         throw err;
       }
-      if(isAbortError(e)||(!didTimeout&&controller&&controller.signal&&controller.signal.aborted)){
-        if(e&&typeof e==='object'&&!e.name) e.name='AbortError';
-        throw e;
-      }
       // Only retry on network errors (TypeError from fetch), not on HTTP errors
       // that were already thrown above. Re-throw 401 redirects immediately.
       if(e.message&&/401/.test(e.message)) throw e;
-      if(attempt<2 && e instanceof TypeError) continue;
+      if(attempt<2&&attempt<maxAttempts-1 && (e instanceof TypeError || retryStatuses.includes(Number(e.status)))){
+        if(retryDelayMs) await new Promise(resolve=>setTimeout(resolve,retryDelayMs*Math.pow(2,attempt)));
+        continue;
+      }
       throw e;
     }finally{
       if(timeoutId) clearTimeout(timeoutId);
@@ -564,8 +564,9 @@ function setLargeMarkdownForceRenderVisible(visible){
 }
 
 function renderMarkdownPreviewContent(data){
-  showPreview('md');
-  $('previewMd').innerHTML=renderMd(data.content);
+  const target=data&&data.el?data.el:$('previewMd');
+  if(!data||!data.el) showPreview('md');
+  target.innerHTML=renderMd(data.content);
   requestAnimationFrame(()=>{if(typeof renderKatexBlocks==='function')renderKatexBlocks();});
 }
 
@@ -1097,7 +1098,7 @@ if (typeof document !== 'undefined') {
       if (e.dataTransfer && e.dataTransfer.types && e.dataTransfer.types.includes('Files')) {
         e.preventDefault();
         e.stopPropagation();
-        if (e.target.closest('.file-item[data-ws-type="dir"],.breadcrumb-seg')) return;
+        if (e.target.closest('.file-item[data-ws-type="dir"],.file-item[data-ws-is-dir="true"],.breadcrumb-seg')) return;
         e.dataTransfer.dropEffect = 'copy';
         tree.classList.add('drag-over-upload');
       }
@@ -1109,7 +1110,7 @@ if (typeof document !== 'undefined') {
     tree.addEventListener('drop', async (e) => {
       tree.classList.remove('drag-over-upload');
       if (!e.dataTransfer || !e.dataTransfer.types || !e.dataTransfer.types.includes('Files')) return;
-      if (e.target.closest('.file-item[data-ws-type="dir"],.breadcrumb-seg')) return;
+      if (e.target.closest('.file-item[data-ws-type="dir"],.file-item[data-ws-is-dir="true"],.breadcrumb-seg')) return;
       e.preventDefault();
       e.stopPropagation();
       await uploadOsDropToWorkspace(e.dataTransfer, S.currentDir || '.');

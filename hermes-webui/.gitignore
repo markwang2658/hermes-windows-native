@@ -70,9 +70,3 @@ graphify-out/
 node_modules/
 package-lock.json
 docs/ui-ux/review-shots/
-tests/test_bg_task_complete_loadsession_stream_restart.py
-tests/test_session_channel_option_x.py
-tests/test_issue4151_pwa_focus_sse.py
-tests/test_issue3996_sse_visibility.py
-tests/test_err_aborted_frontend_static.py
-tests/test_bg_task_complete_loadsession_stream_restart.py

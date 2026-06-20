@@ -18,9 +18,9 @@ This repository is designed for users who want a practical Windows setup without
 
 ## Integrated Versions
 
-- Hermes Agent package version: `0.16.0`
-- Hermes Agent source version: `v2026.6.5`
-- Hermes WebUI source version: `v0.51.454`
+- Hermes Agent package version: `0.17.0`
+- Hermes Agent source version: `v2026.06.19`
+- Hermes WebUI source version: `v0.51.528`
 
 ## Why This Repo Exists
 

@@ -19,7 +19,6 @@ let _kanbanSuppressCardClickUntil = 0;
 // EventSource fails to connect (proxy that strips text/event-stream, etc).
 let _kanbanEventSource = null;
 let _kanbanEventSourceFailures = 0;
-let _kanbanEventSourceIntentionalClose = false;
 let _skillsData = null; // cached skills list
 let _cronList = null; // cached cron jobs (array)
 let _currentCronDetail = null; // full cron job object
@@ -155,6 +154,20 @@ function syncAppTitlebar() {
 }
 
 function _beginSettingsPanelSession() {
+  _settingsIndex = null;
+  _settingsIndexPromise = null;
+  // Invalidate any in-flight search render from a PRIOR Settings session and
+  // reset the search UI, so a slow index build that resolves after the panel
+  // was closed/reopened can't paint stale results into the dropdown. #4340
+  // review fix (filterSettings() bails when its captured seq != current).
+  ++_settingsSearchSeq;
+  const _searchInput = $('settingsSearch');
+  if (_searchInput) _searchInput.value = '';
+  const _searchResults = $('settingsSearchResults');
+  if (_searchResults) {
+    _searchResults.style.display = 'none';
+    _searchResults.innerHTML = '';
+  }
   _settingsDirty = false;
   _settingsThemeOnOpen = localStorage.getItem('hermes-theme') || 'dark';
   _settingsSkinOnOpen = localStorage.getItem('hermes-skin') || 'default';
@@ -165,6 +178,21 @@ function _beginSettingsPanelSession() {
     _settingsAppearanceAutosaveTimer = null;
   }
   _settingsAppearanceAutosaveRetryPayload = null;
+  if (!_settingsSearchDismissListenerRegistered) {
+    _settingsSearchDismissListenerRegistered = true;
+    document.addEventListener('click', e => {
+      if (!e.target.closest('#settingsMenu')) {
+        // Invalidate an in-flight first-build too, so it can't resurrect the
+        // dropdown after an outside-click dismiss. #4340 review fix.
+        ++_settingsSearchSeq;
+        const r = $('settingsSearchResults');
+        if (r) {
+          r.style.display = 'none';
+          r.innerHTML = '';
+        }
+      }
+    });
+  }
   _resetSettingsPanelState();
 }
 
@@ -510,11 +538,19 @@ async function loadCrons(animate) {
       return;
     }
     box.innerHTML = '';
+    // Partition active vs paused so paused jobs don't drown the list (#4026).
+    // _cronList stays the single source of truth — only the render is split,
+    // which keeps openCronDetail, _cronNewJobIds, and detail refresh untouched.
+    const _activeJobs = [];
+    const _pausedJobs = [];
     for (const job of _cronList) {
+      const status = _cronStatusMeta(job);
+      (status.state === 'paused' ? _pausedJobs : _activeJobs).push({ job, status });
+    }
+    const _appendCronItem = (parent, { job, status }) => {
       const item = document.createElement('div');
       item.className = 'cron-item';
       item.id = 'cron-' + job.id;
-      const status = _cronStatusMeta(job);
       const isNewRun = _cronNewJobIds.has(String(job.id));
       const isAgentMode = !job.no_agent;
       const profileLabel = _cronProfileLabel(job.profile);
@@ -529,7 +565,29 @@ async function loadCrons(animate) {
         </div>`;
       item.onclick = () => openCronDetail(job.id, item);
       if (_currentCronDetail && _currentCronDetail.id === job.id) item.classList.add('active');
-      box.appendChild(item);
+      parent.appendChild(item);
+    };
+    for (const entry of _activeJobs) _appendCronItem(box, entry);
+    if (_pausedJobs.length) {
+      let collapsed = true;
+      try { collapsed = localStorage.getItem('cron-paused-collapsed') !== '0'; } catch (_e) {}
+      const details = document.createElement('details');
+      details.className = 'cron-paused-section';
+      if (!collapsed) details.open = true;
+      const pausedLabel = t('cron_status_paused') || 'paused';
+      const headerLabel = pausedLabel.charAt(0).toUpperCase() + pausedLabel.slice(1);
+      const summary = document.createElement('summary');
+      summary.className = 'cron-paused-summary';
+      summary.textContent = `${headerLabel} (${_pausedJobs.length})`;
+      details.appendChild(summary);
+      details.addEventListener('toggle', () => {
+        try { localStorage.setItem('cron-paused-collapsed', details.open ? '0' : '1'); } catch (_e) {}
+      });
+      const inner = document.createElement('div');
+      inner.className = 'cron-paused-inner';
+      details.appendChild(inner);
+      for (const entry of _pausedJobs) _appendCronItem(inner, entry);
+      box.appendChild(details);
     }
     // Re-render current detail with fresh data if we have one and we're not in a form
     if (_currentCronDetail && _cronMode !== 'create' && _cronMode !== 'edit') {
@@ -1986,34 +2044,17 @@ function _kanbanStartPolling(){
 
 function _kanbanStopPolling(){
   if (_kanbanPollTimer) { clearInterval(_kanbanPollTimer); _kanbanPollTimer = null; }
-  if (_kanbanEventSource) {
-    _kanbanEventSourceIntentionalClose = true;
-    try {
-      _kanbanEventSource._intentionalClose = true;
-      _kanbanEventSource._intentionalCloseReason = 'kanban-intentional-close';
-    } catch(_) {}
-    try { _kanbanEventSource.close(); } catch(_) {}
-    _kanbanEventSource = null;
-  }
+  if (_kanbanEventSource) { try { if(_kanbanEventSource.readyState!==2)_kanbanEventSource.close(); } catch(_) {} _kanbanEventSource = null; }
 }
 
 function _kanbanStartEventStream(){
   // Tear down any prior stream before opening a new one (board switch,
   // login change, etc.).
-  if (_kanbanEventSource) {
-    _kanbanEventSourceIntentionalClose = true;
-    try {
-      _kanbanEventSource._intentionalClose = true;
-      _kanbanEventSource._intentionalCloseReason = 'kanban-stream-replaced';
-    } catch(_) {}
-    try { _kanbanEventSource.close(); } catch(_) {}
-    _kanbanEventSource = null;
-  }
+  if (_kanbanEventSource) { try { if(_kanbanEventSource.readyState!==2)_kanbanEventSource.close(); } catch(_) {} _kanbanEventSource = null; }
   const since = Number(_kanbanLatestEventId || 0);
   let url = '/api/kanban/events/stream' + _kanbanBoardQuery({since: since});
   let es;
   try {
-    _kanbanEventSourceIntentionalClose = false;
     es = new EventSource(url);
   } catch(e) {
     _kanbanEventSourceFailures += 1;
@@ -2025,7 +2066,6 @@ function _kanbanStartEventStream(){
   _kanbanEventSource = es;
   es.addEventListener('hello', (ev) => {
     // Reset the failure counter on a successful handshake.
-    _kanbanEventSourceIntentionalClose = false;
     _kanbanEventSourceFailures = 0;
   });
   es.addEventListener('events', async (ev) => {
@@ -2039,22 +2079,11 @@ function _kanbanStartEventStream(){
     _scheduleKanbanRefresh(data.events);
   });
   es.onerror = () => {
-    if (_kanbanEventSourceIntentionalClose || es._intentionalClose) {
-      if (_kanbanEventSource === es) _kanbanEventSource = null;
-      _kanbanEventSourceIntentionalClose = false;
-      return;
-    }
     _kanbanEventSourceFailures += 1;
     if (_kanbanEventSourceFailures >= 3) {
       // Give up on SSE for this session — fall back to HTTP polling.
-      _kanbanEventSourceIntentionalClose = true;
-      try {
-        es._intentionalClose = true;
-        es._intentionalCloseReason = 'kanban-fallback-to-polling';
-      } catch(_) {}
       try { es.close(); } catch(_) {}
       _kanbanEventSource = null;
-      _kanbanEventSourceIntentionalClose = false;
       if (!_kanbanPollTimer) _kanbanPollTimer = setInterval(refreshKanbanEvents, 30000);
     }
     // EventSource auto-reconnects under the hood; nothing more to do here
@@ -2315,14 +2344,51 @@ function _kanbanRunHtml(run){
   </div>`;
 }
 
+function _kanbanJsArg(s){
+  // Encode a value for safe interpolation inside an inline on* handler's JS
+  // string literal. JSON.stringify quotes/escapes for JS context; esc() then
+  // makes it safe inside the HTML attribute. Without this, a task id containing
+  // a quote breaks out of the handler (esc() alone is HTML-escaping, which the
+  // browser decodes BEFORE executing the inline handler). (#3797)
+  return esc(JSON.stringify(String(s == null ? '' : s)));
+}
+function _kanbanLinkableTaskOptions(excludeId){
+  // Datalist of existing task ids (with title as the option label) so the
+  // dependency field is a pick-from-real-tasks autocomplete rather than a blind
+  // free-text opaque-id box. Mirrors the tenant datalist pattern.
+  const cols = (_kanbanBoard && _kanbanBoard.columns) || [];
+  const seen = new Set();
+  const opts = [];
+  for (const col of cols) {
+    for (const task of (col.tasks || [])) {
+      const id = task && task.id;
+      if (!id || id === excludeId || seen.has(id)) continue;
+      seen.add(id);
+      opts.push(`<option value="${esc(id)}">${esc(_kanbanTaskTitle(task))}</option>`);
+    }
+  }
+  return opts.join('');
+}
 function _kanbanLinksHtml(links){
   const parents = (links && links.parents) || [];
   const children = (links && links.children) || [];
-  if (!parents.length && !children.length) return '';
-  const item = id => `<code>${esc(id)}</code>`;
-  return `<div class="kanban-detail-links-grid">
-    <div><strong>${esc(t('kanban_parents'))}</strong><div>${parents.length ? parents.map(item).join(' ') : esc(t('kanban_empty'))}</div></div>
-    <div><strong>${esc(t('kanban_children'))}</strong><div>${children.length ? children.map(item).join(' ') : esc(t('kanban_empty'))}</div></div>
+  const taskId = _kanbanCurrentTaskId;
+  const item = (id, isParent) => {
+    const parentId = isParent ? id : taskId;
+    const childId = isParent ? taskId : id;
+    return `<code>${esc(id)} <button class="btn mini" onclick="removeKanbanDependency(${_kanbanJsArg(parentId)},${_kanbanJsArg(childId)})" data-i18n="kanban_remove_dependency" title="${esc(t('kanban_remove_dependency') || 'Remove')}">✕</button></code>`;
+  };
+  const hasLinks = parents.length || children.length;
+  return `<div class="kanban-detail-links-section">
+    ${hasLinks ? `<div class="kanban-detail-links-grid">
+      <div><strong>${esc(t('kanban_parents'))}</strong><div>${parents.length ? parents.map(id => item(id, true)).join(' ') : esc(t('kanban_empty'))}</div></div>
+      <div><strong>${esc(t('kanban_children'))}</strong><div>${children.length ? children.map(id => item(id, false)).join(' ') : esc(t('kanban_empty'))}</div></div>
+    </div>` : ''}
+    <div class="kanban-detail-links-controls">
+      <input type="text" id="kanbanDependencyInput" class="kanban-detail-links-input" list="kanbanDependencyOptions" maxlength="255" autocomplete="off" data-i18n-placeholder="kanban_dependency_placeholder" placeholder="Task ID to link">
+      <datalist id="kanbanDependencyOptions">${_kanbanLinkableTaskOptions(taskId)}</datalist>
+      <button class="btn secondary" onclick="addKanbanDependency(${_kanbanJsArg(taskId)})" data-i18n="kanban_add_dependency">Add dependency</button>
+    </div>
   </div>`;
 }
 
@@ -2599,12 +2665,20 @@ function _kanbanResetTaskModalFields(values){
 function _kanbanSetTaskModalLabels(mode){
   const titleH = document.getElementById('kanbanTaskModalTitle');
   const submitBtn = document.getElementById('kanbanTaskModalSubmit');
+  const workspaceKindEl = document.getElementById('kanbanTaskModalWorkspaceKind');
+  const workspacePathEl = document.getElementById('kanbanTaskModalWorkspacePath');
   if (mode === 'edit') {
     if (titleH) titleH.textContent = t('kanban_edit_task') || 'Edit task';
     if (submitBtn) submitBtn.textContent = t('save') || 'Save';
+    // Disable workspace fields during edit since they are not handled by the backend
+    if (workspaceKindEl) workspaceKindEl.disabled = true;
+    if (workspacePathEl) workspacePathEl.disabled = true;
   } else {
     if (titleH) titleH.textContent = t('kanban_new_task') || 'New task';
     if (submitBtn) submitBtn.textContent = t('create') || 'Create';
+    // Enable workspace fields during create
+    if (workspaceKindEl) workspaceKindEl.disabled = false;
+    if (workspacePathEl) workspacePathEl.disabled = false;
   }
 }
 
@@ -2698,6 +2772,14 @@ function _kanbanTaskModalKey(ev){
   }
 }
 
+function _kanbanOnWorkspaceKindChange(){
+  const kindEl = document.getElementById('kanbanTaskModalWorkspaceKind');
+  const pathRowEl = document.getElementById('kanbanTaskModalWorkspacePathRow');
+  if (!kindEl || !pathRowEl) return;
+  const kind = kindEl.value;
+  pathRowEl.style.display = (kind === 'scratch') ? 'none' : 'block';
+}
+
 async function submitKanbanTaskModal(){
   const titleEl = document.getElementById('kanbanTaskModalTitleInput');
   const bodyEl = document.getElementById('kanbanTaskModalBody');
@@ -2705,6 +2787,8 @@ async function submitKanbanTaskModal(){
   const assigneeEl = document.getElementById('kanbanTaskModalAssignee');
   const tenantEl = document.getElementById('kanbanTaskModalTenant');
   const priorityEl = document.getElementById('kanbanTaskModalPriority');
+  const workspaceKindEl = document.getElementById('kanbanTaskModalWorkspaceKind');
+  const workspacePathEl = document.getElementById('kanbanTaskModalWorkspacePath');
   const errEl = document.getElementById('kanbanTaskModalError');
   const submitBtn = document.getElementById('kanbanTaskModalSubmit');
   const title = titleEl ? titleEl.value.trim() : '';
@@ -2716,12 +2800,23 @@ async function submitKanbanTaskModal(){
   // Build payload — for create we omit defaulted fields so the backend chooses;
   // for edit we send every field so users can clear assignee/tenant/body.
   const isEdit = _kanbanTaskModalMode === 'edit';
+  // Validate workspace path for non-scratch workspace kinds (create mode only)
+  const workspaceKind = workspaceKindEl ? workspaceKindEl.value : 'scratch';
+  if (!isEdit && workspaceKind !== 'scratch') {
+    const workspacePath = workspacePathEl ? workspacePathEl.value.trim() : '';
+    if (!workspacePath) {
+      if (errEl) errEl.textContent = t('kanban_workspace_path_required') || 'Workspace path is required for non-scratch workspaces.';
+      if (workspacePathEl) workspacePathEl.focus();
+      return;
+    }
+  }
   const payload = {title};
   const bodyVal = bodyEl ? bodyEl.value : '';
   const assigneeVal = assigneeEl ? assigneeEl.value.trim() : '';
   const tenantVal = tenantEl ? tenantEl.value.trim() : '';
   const statusVal = statusEl ? statusEl.value : '';
   const priorityRaw = priorityEl ? priorityEl.value : '';
+  const workspacePathVal = workspacePathEl ? workspacePathEl.value.trim() : '';
   if (isEdit) {
     payload.body = bodyVal;
     payload.assignee = assigneeVal || null;
@@ -2735,6 +2830,8 @@ async function submitKanbanTaskModal(){
     }
     const n = parseInt(priorityRaw, 10);
     payload.priority = Number.isNaN(n) ? 0 : n;
+    // Note: workspace_kind and workspace_path are not sent on edit because
+    // the backend _patch_task does not handle them (they are dropped).
   } else {
     if (bodyVal.trim()) payload.body = bodyVal;
     if (statusVal) payload.status = statusVal;
@@ -2744,6 +2841,8 @@ async function submitKanbanTaskModal(){
       const n = parseInt(priorityRaw, 10);
       if (!Number.isNaN(n)) payload.priority = n;
     }
+    payload.workspace_kind = workspaceKind;
+    if (workspacePathVal) payload.workspace_path = workspacePathVal;
   }
   // Soft warning: a Ready task with the explicit "Unassigned" option will sit
   // forever because the dispatcher skips unassigned rows (kanban_db.py:3567).
@@ -2813,6 +2912,40 @@ async function addKanbanComment(taskId){
     });
     if (input) input.value = '';
     await loadKanbanTask(taskId);
+  } catch(e) { showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error'); }
+}
+
+async function addKanbanDependency(taskId){
+  const input = document.getElementById('kanbanDependencyInput');
+  const linkTo = input ? input.value.trim() : '';
+  if (!taskId || !linkTo) return;
+  if (linkTo === taskId) {
+    showToast(t('kanban_dependency_self') || 'A task cannot depend on itself', 'error');
+    return;
+  }
+  try {
+    // "Add dependency" on task X means "X depends on linkTo" → linkTo is the
+    // prerequisite (parent) that must complete before X (child). The backend
+    // models a (parent_id, child_id) row as parent=prerequisite/child=dependent
+    // (api/kanban_bridge.py), so linkTo is the parent and the current task is
+    // the child. (#3797)
+    await api('/api/kanban/links' + _kanbanBoardQuery(), {
+      method: 'POST',
+      body: JSON.stringify({parent_id: linkTo, child_id: taskId}),
+    });
+    if (input) input.value = '';
+    await loadKanbanTask(taskId);
+  } catch(e) { showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error'); }
+}
+
+async function removeKanbanDependency(parentId, childId){
+  if (!parentId || !childId) return;
+  try {
+    await api('/api/kanban/links/delete' + _kanbanBoardQuery(), {
+      method: 'POST',
+      body: JSON.stringify({parent_id: parentId, child_id: childId}),
+    });
+    await loadKanbanTask(_kanbanCurrentTaskId);
   } catch(e) { showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error'); }
 }
 
@@ -3598,9 +3731,96 @@ function _renderLlmWikiStatus(d) {
       </div>
       <div class="wiki-status-footer">
         <span>${esc(toggleNote)}</span>
-        <a href="${esc(docsUrl)}" target="_blank" rel="noopener noreferrer">Docs</a>
+        <div style="display:flex;align-items:center;gap:8px;">
+          ${isReady || isEmpty ? `<button class="wiki-browse-btn" onclick="_openWikiBrowser()">${esc(t('wiki_browse'))}</button>` : ''}
+          <a href="${esc(docsUrl)}" target="_blank" rel="noopener noreferrer">Docs</a>
+        </div>
       </div>
     </div>`;
+}
+
+async function _openWikiBrowser() {
+  const existing = document.getElementById('wikiBrowserOverlay');
+  if (existing) { existing.style.display = 'flex'; return; }
+
+  const overlay = document.createElement('div');
+  overlay.id = 'wikiBrowserOverlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999;';
+
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.style.display = 'none'; });
+  document.addEventListener('keydown', function escHandler(e) {
+    if (e.key === 'Escape') { overlay.style.display = 'none'; document.removeEventListener('keydown', escHandler); }
+  });
+
+  const panel = document.createElement('div');
+  panel.style.cssText = 'background:var(--bg);border:1px solid var(--border);border-radius:8px;width:min(720px,95vw);max-height:80vh;display:flex;flex-direction:column;overflow:hidden;';
+
+  panel.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid var(--border);">
+      <strong style="font-size:14px;">${esc(t('wiki_browse'))}</strong>
+      <button onclick="document.getElementById('wikiBrowserOverlay').style.display='none'" style="background:none;border:none;cursor:pointer;font-size:18px;color:var(--muted);">&#x2715;</button>
+    </div>
+    <div style="padding:10px 16px;border-bottom:1px solid var(--border);">
+      <input id="wikiBrowserSearch" type="text" placeholder="${esc(t('wiki_search_placeholder'))}" style="width:100%;padding:6px 10px;background:var(--input-bg,var(--bg));border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:13px;box-sizing:border-box;" />
+    </div>
+    <div id="wikiBrowserList" style="flex:1;overflow-y:auto;padding:8px 0;min-height:80px;"></div>
+    <div id="wikiBrowserContent" style="display:none;flex:1;overflow-y:auto;padding:16px;border-top:1px solid var(--border);"></div>`;
+
+  overlay.appendChild(panel);
+  document.body.appendChild(overlay);
+
+  const listEl = document.getElementById('wikiBrowserList');
+  const contentEl = document.getElementById('wikiBrowserContent');
+  const searchEl = document.getElementById('wikiBrowserSearch');
+  let _pages = [];
+
+  function _renderWikiPageList(filter) {
+    const q = (filter || '').toLowerCase();
+    const visible = q ? _pages.filter(p => p.name.toLowerCase().includes(q)) : _pages;
+    if (!visible.length) {
+      listEl.innerHTML = `<div style="padding:12px 16px;color:var(--muted);font-size:13px;">${esc(t('wiki_no_pages'))}</div>`;
+      return;
+    }
+    listEl.innerHTML = visible.map(p =>
+      `<div class="wiki-browser-item" data-path="${esc(p.path)}" style="padding:7px 16px;cursor:pointer;font-size:13px;border-radius:4px;margin:0 6px;" onmouseover="this.style.background='var(--hover,rgba(255,255,255,0.07))'" onmouseout="this.style.background=''" onclick="window._wikiBrowserOpenPage(this.dataset.path)">${esc(p.name)}</div>`
+    ).join('');
+  }
+
+  window._wikiBrowserOpenPage = async function(path) {
+    contentEl.innerHTML = '<div style="padding:12px;color:var(--muted);font-size:13px;">Loading...</div>';
+    contentEl.style.display = 'block';
+    listEl.style.display = 'none';
+    try {
+      const data = await api('/api/wiki/page?path=' + encodeURIComponent(path));
+      if (typeof renderMarkdownPreviewContent === 'function') {
+        contentEl.innerHTML = '<button onclick="window._wikiBrowserBack()" style="margin-bottom:10px;background:none;border:1px solid var(--border);border-radius:4px;padding:3px 10px;cursor:pointer;font-size:12px;color:var(--text);">&#8592; Back</button><div id="wikiBrowserMd"></div>';
+        renderMarkdownPreviewContent({content: data.content, el: document.getElementById('wikiBrowserMd')});
+      } else {
+        contentEl.innerHTML = '<button onclick="window._wikiBrowserBack()" style="margin-bottom:10px;background:none;border:1px solid var(--border);border-radius:4px;padding:3px 10px;cursor:pointer;font-size:12px;color:var(--text);">&#8592; Back</button><pre style="white-space:pre-wrap;word-break:break-word;font-size:12px;margin:0;">' + esc(data.content) + '</pre>';
+      }
+    } catch(e) {
+      contentEl.innerHTML = '<button onclick="window._wikiBrowserBack()" style="margin-bottom:10px;background:none;border:1px solid var(--border);border-radius:4px;padding:3px 10px;cursor:pointer;font-size:12px;color:var(--text);">&#8592; Back</button><div style="color:var(--error,#f55);">' + esc(e.message || String(e)) + '</div>';
+    }
+  };
+
+  window._wikiBrowserBack = function() {
+    contentEl.style.display = 'none';
+    listEl.style.display = '';
+  };
+
+  searchEl.addEventListener('input', () => _renderWikiPageList(searchEl.value));
+
+  try {
+    const data = await api('/api/wiki/browse');
+    _pages = Array.isArray(data && data.pages) ? data.pages : [];
+    if (!_pages.length) {
+      listEl.innerHTML = `<div style="padding:12px 16px;color:var(--muted);font-size:13px;">${esc(t('wiki_no_pages'))}</div>`;
+    } else {
+      _renderWikiPageList('');
+    }
+  } catch(e) {
+    listEl.innerHTML = `<div style="padding:12px 16px;color:var(--error,#f55);font-size:13px;">${esc(e.message || String(e))}</div>`;
+  }
 }
 
 /**
@@ -5228,7 +5448,7 @@ async function promptWorkspacePath(){
     if(!ws)return;
     try{
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws})});
-      if(r&&r.session){S.session=r.session;S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
+      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
     }catch(e){showToast(t('workspace_switch_failed')+e.message);return;}
     if(!S.session)return;
   }
@@ -5264,7 +5484,7 @@ async function switchToWorkspace(path,name){
     if(!ws){showToast(t('no_workspace'));return;}
     try{
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws})});
-      if(r&&r.session){S.session=r.session;S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
+      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
     }catch(e){if(typeof setStatus==='function')setStatus(t('switch_failed')+e.message);return;}
     if(!S.session)return;
   }
@@ -5292,6 +5512,7 @@ async function switchToWorkspace(path,name){
     // Explicit workspace switch = user overriding any pending profile-switch default.
     // Clear the one-shot flag so a subsequent newSession() inherits this choice instead.
     S._profileSwitchWorkspace=null;
+    S._pendingSessionToolsets=null;
     syncTopbar();
     await loadDir('.');
     if (_currentPanel === 'memory') await loadMemory(true);
@@ -5345,17 +5566,28 @@ async function loadProfilesPanel() {
     const data = await api('/api/profiles');
     _profilesCache = data;
     panel.innerHTML = '';
-    const explainer = document.createElement('div');
-    explainer.className = 'profile-card profile-help-card';
-    explainer.innerHTML = `
-      <div class="profile-card-header">
-        <div style="min-width:0;flex:1">
-          <div class="profile-card-name">Profiles vs workspaces</div>
-          <div class="profile-card-meta">Use profiles for how the agent works; use workspaces for what files it works on.</div>
-        </div>
-      </div>`;
-    explainer.onclick = () => _renderProfileConceptHelp(data.active || 'default');
-    panel.appendChild(explainer);
+
+    // Hide "New profile" button in single profile mode
+    const newProfileBtn = document.querySelector('[onclick="openProfileCreate()"]');
+    if (newProfileBtn) {
+      newProfileBtn.style.display = data.single_profile_mode ? 'none' : '';
+    }
+
+    // In single profile mode, don't show the explanatory card
+    if (!data.single_profile_mode) {
+      const explainer = document.createElement('div');
+      explainer.className = 'profile-card profile-help-card';
+      explainer.innerHTML = `
+        <div class="profile-card-header">
+          <div style="min-width:0;flex:1">
+            <div class="profile-card-name">Profiles vs workspaces</div>
+            <div class="profile-card-meta">Use profiles for how the agent works; use workspaces for what files it works on.</div>
+          </div>
+        </div>`;
+      explainer.onclick = () => _renderProfileConceptHelp(data.active || 'default');
+      panel.appendChild(explainer);
+    }
+
     if (!data.profiles || !data.profiles.length) {
       const emptyMsg = document.createElement('div');
       emptyMsg.style.cssText = 'padding:16px;color:var(--muted);font-size:12px';
@@ -5474,8 +5706,9 @@ function _setProfileHeaderButtons(mode, p, activeName){
   if (mode === 'read') {
     const isActive = p && p.name === activeName;
     const isDefault = !!(p && p.is_default);
-    if (isActive) hide(actBtn); else show(actBtn);
-    if (isDefault) hide(delBtn); else show(delBtn);
+    const singleProfileMode = !!(_profilesCache && _profilesCache.single_profile_mode);
+    if (isActive || singleProfileMode) hide(actBtn); else show(actBtn);
+    if (isDefault || singleProfileMode) hide(delBtn); else show(delBtn);
     hide(cancelBtn); hide(saveBtn);
   } else if (mode === 'create') {
     hide(actBtn); hide(delBtn); show(cancelBtn); show(saveBtn);
@@ -5553,12 +5786,14 @@ function renderProfileDropdown(data) {
     };
     dd.appendChild(opt);
   }
-  // Divider + Manage link
-  const div = document.createElement('div'); div.className = 'ws-divider'; dd.appendChild(div);
-  const mgmt = document.createElement('div'); mgmt.className = 'profile-opt ws-manage';
-  mgmt.innerHTML = `${li('settings',12)} ${esc(t('manage_profiles'))}`;
-  mgmt.onclick = () => { closeProfileDropdown(); mobileSwitchPanel('profiles'); };
-  dd.appendChild(mgmt);
+  // Divider + Manage link (hidden in single profile mode)
+  if (!data.single_profile_mode) {
+    const div = document.createElement('div'); div.className = 'ws-divider'; dd.appendChild(div);
+    const mgmt = document.createElement('div'); mgmt.className = 'profile-opt ws-manage';
+    mgmt.innerHTML = `${li('settings',12)} ${esc(t('manage_profiles'))}`;
+    mgmt.onclick = () => { closeProfileDropdown(); mobileSwitchPanel('profiles'); };
+    dd.appendChild(mgmt);
+  }
 }
 
 function toggleProfileDropdown() {
@@ -5568,6 +5803,11 @@ function toggleProfileDropdown() {
   closeWsDropdown(); // close workspace dropdown if open
   if(typeof closeModelDropdown==='function') closeModelDropdown();
   api('/api/profiles').then(data => {
+    // In single profile mode, don't show profile dropdown at all
+    if (data.single_profile_mode) {
+      closeProfileDropdown();
+      return;
+    }
     renderProfileDropdown(data);
     dd.classList.add('open');
     _positionProfileDropdown();
@@ -5591,6 +5831,7 @@ window.addEventListener('resize',()=>{
 });
 
 async function switchToProfile(name) {
+  S._pendingSessionToolsets=null;
   // Profile switches are per-client cookie/TLS scoped, so a running stream in
   // the current session can safely continue while this tab moves to another
   // profile. The in-flight session stays attached to its original profile.
@@ -5978,6 +6219,10 @@ let _settingsFontSizeOnOpen = null; // track font size at open time for discard 
 let _settingsHermesDefaultModelOnOpen = '';
 let _settingsSection = 'conversation';
 let _currentSettingsSection = 'conversation';
+let _settingsIndex = null;
+let _settingsIndexPromise = null;
+let _settingsSearchSeq = 0;
+let _settingsSearchDismissListenerRegistered = false;
 let _settingsAppearanceAutosaveTimer = null;
 let _settingsAppearanceAutosaveRetryPayload = null;
 let _settingsPreferencesAutosaveTimer = null;
@@ -6166,7 +6411,7 @@ function _toggleTabVisibilityChip(panel){
   _scheduleAppearanceAutosave();
 }
 
-function switchSettingsSection(name){
+function switchSettingsSection(name,opts){
   // If the main content is not showing settings, just remember the section
   // without force-switching the panel. The section will be applied when the
   // user next opens settings via switchPanel(). (#appearance-auto-reopen)
@@ -6200,9 +6445,180 @@ function switchSettingsSection(name){
   // Sync mobile dropdown
   const dd=$('settingsSectionDropdown');
   if(dd && dd.value!==section) dd.value=section;
-  // Lazy-load integration panels when their tabs are opened
-  if(section==='providers') loadProvidersPanel();
-  if(section==='plugins') loadPluginsPanel();
+  // Lazy-load integration panels when their tabs are opened. Search
+  // navigation passes skipLazyLoad: the loaders rebuild the pane DOM from a
+  // fresh fetch, which would detach the field it is about to scroll to.
+  if(!(opts&&opts.skipLazyLoad)){
+    if(section==='providers') loadProvidersPanel();
+    if(section==='plugins') loadPluginsPanel();
+  }
+}
+
+async function _buildSettingsIndex() {
+  if (_settingsIndex) return;
+  // Memoize the in-flight build so concurrent searches share one pass; the
+  // lazy pane loaders are not guaranteed re-entrant.
+  if (_settingsIndexPromise) return _settingsIndexPromise;
+  const promise = (async () => {
+    // Ensure lazy-loaded panes are populated before reading the DOM
+    await Promise.all([loadProvidersPanel(), loadPluginsPanel()]);
+    const index = [];
+    const sectionMap = {
+      settingsPaneConversation: 'conversation',
+      settingsPaneAppearance: 'appearance',
+      settingsPanePreferences: 'preferences',
+      settingsPaneProviders: 'providers',
+      settingsPanePlugins: 'plugins',
+      settingsPaneSystem: 'system',
+      settingsPaneHelp: 'help',
+    };
+    for (const [paneId, sectionKey] of Object.entries(sectionMap)) {
+      const pane = $(paneId);
+      if (!pane) continue;
+      pane.querySelectorAll('.settings-field').forEach(field => {
+        // The i18n key may live on the <label> itself (label[data-i18n]) OR on
+        // a child of the label — the common toggle shape is
+        // <label><input><span data-i18n="..."></span></label>. Match both, plus
+        // a plain <label> with no i18n key, so every field is searchable
+        // (previously only label[data-i18n] indexed, silently dropping most
+        // checkbox settings). #4340 review fix.
+        const labelEl = field.querySelector('label[data-i18n], label [data-i18n], label');
+        if (!labelEl) return;
+        const i18nKey = labelEl.dataset ? labelEl.dataset.i18n : undefined;
+        const label = (i18nKey && t(i18nKey)) || labelEl.textContent.trim();
+        if (label) index.push({ label, sectionKey, i18nKey, el: field });
+      });
+      if (sectionKey === 'providers') {
+        pane.querySelectorAll('.provider-card').forEach(card => {
+          const cardName = ((card.querySelector('.provider-card-name') || {}).textContent || '').trim();
+          if (cardName) index.push({ label: cardName, sectionKey, el: card, cardName });
+          card.querySelectorAll('.provider-card-field').forEach(field => {
+            const fieldLabel = ((field.querySelector('.provider-card-label') || {}).textContent || '').trim();
+            const label = [cardName, fieldLabel].filter(Boolean).join(' ');
+            if (label) index.push({ label, sectionKey, el: field, cardName, fieldLabel });
+          });
+        });
+      }
+      if (sectionKey === 'plugins') {
+        pane.querySelectorAll('.plugin-card').forEach(card => {
+          const cardName = ((card.querySelector('.provider-card-name') || {}).textContent || '').trim();
+          if (cardName) index.push({ label: cardName, sectionKey, el: card, cardName });
+        });
+      }
+    }
+    // A panel-session reset while building clears the memo; drop this result
+    // instead of resurrecting a stale index for the new session.
+    if (_settingsIndexPromise === promise) _settingsIndex = index;
+  })().catch(e => { if (_settingsIndexPromise === promise) _settingsIndexPromise = null; throw e; });
+  _settingsIndexPromise = promise;
+  return promise;
+}
+
+async function filterSettings(query) {
+  const resultsEl = $('settingsSearchResults');
+  if (!resultsEl) return;
+  const q = (query || '').trim().toLowerCase();
+  if (!q) { ++_settingsSearchSeq; resultsEl.style.display = 'none'; resultsEl.innerHTML = ''; return; }
+  const seq = ++_settingsSearchSeq;
+  await _buildSettingsIndex();
+  // A newer keystroke superseded this query while the index was building.
+  if (seq !== _settingsSearchSeq) return;
+  const sectionLabels = {
+    conversation: t('settings_tab_conversation') || 'Conversation',
+    appearance: t('settings_tab_appearance') || 'Appearance',
+    preferences: t('settings_tab_preferences') || 'Preferences',
+    providers: t('providers_tab_title') || 'Providers',
+    plugins: t('settings_tab_plugins') || 'Plugins',
+    system: t('settings_tab_system') || 'System',
+    help: t('settings_tab_help') || 'Help',
+  };
+  const matches = (_settingsIndex || []).filter(entry =>
+    entry.label.toLowerCase().includes(q)
+  );
+  if (!matches.length) {
+    resultsEl.innerHTML = `<div class="settings-search-empty">${esc(t('settings_search_no_results') || 'No settings found.')}</div>`;
+    resultsEl.style.display = '';
+    return;
+  }
+  resultsEl.innerHTML = '';
+  for (const m of matches.slice(0, 12)) {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'settings-search-result';
+    item.innerHTML = `<span class="settings-search-section">${esc(sectionLabels[m.sectionKey] || m.sectionKey)}</span>` +
+      `<span class="settings-search-arrow">›</span>` +
+      `<span class="settings-search-label">${esc(m.label)}</span>`;
+    item.addEventListener('click', () => {
+      _navigateToSettingsField(m);
+      resultsEl.style.display = 'none';
+      resultsEl.innerHTML = '';
+      const input = $('settingsSearch');
+      if (input) input.value = '';
+    });
+    resultsEl.appendChild(item);
+  }
+  resultsEl.style.display = '';
+}
+
+function _navigateToSettingsField(entry) {
+  // The panes were populated when the index was built, so skip the tab-switch
+  // lazy reload: loadProvidersPanel()/loadPluginsPanel() rebuild the pane DOM
+  // from a fresh fetch and would detach the node mid-scroll.
+  switchSettingsSection(entry.sectionKey, { skipLazyLoad: true });
+  requestAnimationFrame(() => {
+    const el = _resolveSettingsField(entry);
+    if (!el) return;
+    el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    _highlightSettingsField(el);
+  });
+}
+
+function _resolveSettingsField(entry) {
+  // Re-resolve in the live DOM: any pane re-render since indexing (e.g. the
+  // user visited the tab) replaces the node the index captured.
+  const paneIds = {
+    conversation: 'settingsPaneConversation',
+    appearance: 'settingsPaneAppearance',
+    preferences: 'settingsPanePreferences',
+    providers: 'settingsPaneProviders',
+    plugins: 'settingsPanePlugins',
+    system: 'settingsPaneSystem',
+    help: 'settingsPaneHelp',
+  };
+  const pane = $(paneIds[entry.sectionKey]);
+  if (pane && entry.cardName && (entry.sectionKey === 'providers' || entry.sectionKey === 'plugins')) {
+    const cards = entry.sectionKey === 'providers'
+      ? pane.querySelectorAll('.provider-card')
+      : pane.querySelectorAll('.plugin-card');
+    for (const card of cards) {
+      const name = ((card.querySelector('.provider-card-name') || {}).textContent || '').trim();
+      if (name !== entry.cardName) continue;
+      if (entry.fieldLabel && entry.sectionKey === 'providers') {
+        for (const field of card.querySelectorAll('.provider-card-field')) {
+          const label = ((field.querySelector('.provider-card-label') || {}).textContent || '').trim();
+          if (label === entry.fieldLabel) return field;
+        }
+      }
+      return card;
+    }
+  }
+  // The i18n key may sit on the label or on a child of it (span inside a
+  // toggle label), so resolve via any [data-i18n] node, then climb to the
+  // enclosing .settings-field. #4340 review fix.
+  const labelEl = pane && entry.i18nKey
+    ? pane.querySelector(`[data-i18n="${CSS.escape(entry.i18nKey)}"]`)
+    : null;
+  const live = labelEl && labelEl.closest('.settings-field');
+  if (live) return live;
+  return entry.el && entry.el.isConnected ? entry.el : null;
+}
+
+function _highlightSettingsField(el) {
+  if (!el) return;
+  el.classList.remove('settings-field-highlight');
+  void el.offsetWidth;
+  el.classList.add('settings-field-highlight');
+  setTimeout(() => el.classList.remove('settings-field-highlight'), 1800);
 }
 
 function _syncHermesPanelSessionActions(){
@@ -6439,6 +6855,15 @@ function _preferencesPayloadFromUi(){
   if(showConversationOutlineCb) payload.show_conversation_outline=showConversationOutlineCb.checked;
   const hideSuggestionsCb=$('settingsHideSuggestions');
   if(hideSuggestionsCb) payload.hide_empty_state_suggestions=hideSuggestionsCb.checked;
+  const virtualizeTranscriptCb=$('settingsVirtualizeTranscript');
+  if(virtualizeTranscriptCb){
+    payload.virtualize_transcript=virtualizeTranscriptCb.checked;
+    // #4343: persist the opt-in marker alongside. Enabling the experimental
+    // feature records an explicit post-flip opt-in so load_settings honors it
+    // (a stored true WITHOUT this marker is treated as a stale pre-flip value
+    // and reset to off). Unchecking clears the marker.
+    payload.virtualize_transcript_optin=virtualizeTranscriptCb.checked;
+  }
   const showTpsCb=$('settingsShowTps');
   if(showTpsCb) payload.show_tps=showTpsCb.checked;
   const fadeTextCb=$('settingsFadeTextEffect');
@@ -6791,6 +7216,21 @@ async function loadSettingsPanel(){
         _schedulePreferencesAutosave();
       },{once:false});
     }
+    const virtualizeTranscriptCb=$('settingsVirtualizeTranscript');
+    if(virtualizeTranscriptCb){
+      // #4343: EXPERIMENTAL/opt-IN, default OFF. Honor a stored true only when
+      // it came from an explicit post-flip opt-in (===true); a pre-flip true is
+      // already reset to false server-side by the load_settings migration.
+      virtualizeTranscriptCb.checked=settings.virtualize_transcript===true;
+      window._virtualizeTranscript=virtualizeTranscriptCb.checked;
+      virtualizeTranscriptCb.addEventListener('change',()=>{
+        window._virtualizeTranscript=virtualizeTranscriptCb.checked;
+        // Re-render the open transcript so the change takes effect immediately
+        // (full render when off, windowed when on).
+        if(typeof renderMessages==='function'){ try{ renderMessages({preserveScroll:true}); }catch(e){ console.warn('[virtualize_transcript] renderMessages failed on toggle:',e); } }
+        _schedulePreferencesAutosave();
+      },{once:false});
+    }
     const showConversationOutlineCb=$('settingsShowConversationOutline');
     if(showConversationOutlineCb){
       showConversationOutlineCb.checked=settings.show_conversation_outline===true;
@@ -6904,7 +7344,9 @@ async function loadSettingsPanel(){
       if(!ttsVoiceSel) return;
       const engine=localStorage.getItem('hermes-tts-engine')||'browser';
       const current=localStorage.getItem('hermes-tts-voice')||'';
-      if(engine==='edge'){
+      if(engine==='elevenlabs'){
+        ttsVoiceSel.innerHTML='<option value="">Hermy — ElevenLabs (server-configured)</option>';
+      } else if(engine==='edge'){
         const edgeVoices=[
           {value:'zh-CN-XiaoxiaoNeural',label:'Xiaoxiao (Chinese, Female)'},
           {value:'zh-CN-XiaoyiNeural',label:'Xiaoyi (Chinese, Female)'},
@@ -8013,12 +8455,22 @@ async function checkUpdatesNow(){
       const agentPart=formatUpdatePart('Agent',data.agent);
       if(webuiPart) parts.push(webuiPart);
       if(agentPart) parts.push(agentPart);
+      // Track non-git targets separately so a mixed deployment (one git
+      // checkout + one no-git install) never hides the "can't check" state
+      // behind an up-to-date summary (#4356).
+      const noGitParts=[];
+      if(data.webui&&data.webui.no_git) noGitParts.push('WebUI');
+      if(data.agent&&data.agent.no_git&&!data.agent.ignored) noGitParts.push('Agent');
       if(parts.length){
-        if(status){status.textContent=t('settings_updates_available').replace('{count}',parts.join(', '));status.style.color='var(--accent)';}
+        let txt=t('settings_updates_available').replace('{count}',parts.join(', '));
+        if(noGitParts.length) txt+=' · '+t('settings_update_no_git');
+        if(status){status.textContent=txt;status.style.color='var(--accent)';}
         // Also trigger the update banner
         if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);
       } else if(errorParts.length){
         if(status){status.textContent=t('settings_update_check_failed')+': '+errorParts.join(', ');status.style.color='var(--error)';}
+      } else if(noGitParts.length){
+        if(status){status.textContent=t('settings_update_no_git');status.style.color='var(--muted)';}
       } else {
         if(status){status.textContent=t('settings_up_to_date');status.style.color='var(--success)';}
         if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);
@@ -8878,42 +9330,69 @@ function loadMcpTools(){
     filterMcpTools();
   }).catch(()=>{list.innerHTML=`<div class="mcp-tool-error-state" style="color:#ef4444;font-size:12px;padding:6px 0">${esc(t('mcp_tools_load_failed'))}</div>`});
 }
+let _gatewayActionInFlight=false;
+function _gatewayActionButton(action){
+  const labels={start:t('gateway_start'),stop:t('gateway_stop'),restart:t('gateway_restart')};
+  return `<button class="sm-btn gateway-action-btn" data-gateway-action="${esc(action)}" onclick="_gatewayAction('${esc(action)}')" ${_gatewayActionInFlight?'disabled':''} style="padding:5px 10px;font-size:12px">${esc(labels[action]||action)}</button>`;
+}
+function _gatewayActionControls(r){
+  const actions=(r&&r.running)?['stop','restart']:['start'];
+  return `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px">${actions.map(_gatewayActionButton).join('')}</div>`;
+}
+function _renderGatewayStatus(r){
+  const card=$('gatewayStatusCard');
+  if(!card||!r) return;
+  if(!r.configured){
+    card.innerHTML=`<div style="color:var(--muted);font-size:12px;display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#f59e0b;display:inline-block"></span>${esc(t('gateway_not_configured'))}</div>${_gatewayActionControls(r)}`;
+    return;
+  }
+  if(!r.running){
+    const reason = _gatewayStatusReason(r);
+    const statusLabel = reason === 'gateway_stale_running_state'
+      ? t('gateway_metadata_stale')
+      : reason === 'remote_gateway_unreachable'
+        ? t('gateway_endpoint_unreachable')
+        : t('gateway_not_running');
+    card.innerHTML=`<div style="color:var(--muted);font-size:12px;display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#ef4444;display:inline-block"></span>${esc(statusLabel)}</div>${_gatewayActionControls(r)}`;
+    return;
+  }
+  const platformIcons={telegram:'💬',discord:'🎮',slack:'📝',web:'🌐',api:'🔌'};
+  let badges='';
+  if(r.platforms&&r.platforms.length){
+    badges=r.platforms.map(p=>{
+      const icon=platformIcons[p.name]||'📡';
+      return `<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;background:var(--code-bg);border:1px solid var(--border2);border-radius:12px;font-size:12px;font-weight:500">${icon} ${esc(p.label)}</span>`;
+    }).join(' ');
+  }
+  const lastActive=r.last_active?`<span style="font-size:11px;color:var(--muted)">${esc(t('gateway_last_active'))}: ${esc(new Date(r.last_active).toLocaleString())}</span>`:'';
+  const sessionInfo=r.session_count?`<span style="font-size:11px;color:var(--muted)">${r.session_count} ${esc(r.session_count!==1?t('gateway_sessions'):t('gateway_session'))}</span>`:'';
+  card.innerHTML=`<div style="display:flex;align-items:center;gap:6px;margin-bottom:8px"><span style="width:8px;height:8px;border-radius:50%;background:#22c55e;display:inline-block"></span><span style="font-size:13px;font-weight:500;color:#22c55e">${esc(t('gateway_running'))}</span></div>${badges?`<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">${badges}</div>`:''}<div style="display:flex;gap:12px">${sessionInfo}${lastActive}</div>${_gatewayActionControls(r)}`;
+}
 function loadGatewayStatus(){
   const card=$('gatewayStatusCard');
   if(!card) return;
-  api('/api/gateway/status').then(r=>{
-    if(!r) return;
-    if(!r.configured){
-      card.innerHTML=`<div style="color:var(--muted);font-size:12px;display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#f59e0b;display:inline-block"></span>${esc(t('gateway_not_configured'))}</div>`;
-      return;
-    }
-    if(!r.running){
-      const reason = _gatewayStatusReason(r);
-      const statusLabel = reason === 'gateway_stale_running_state'
-        ? t('gateway_metadata_stale')
-        : reason === 'remote_gateway_unreachable'
-          ? t('gateway_endpoint_unreachable')
-          : t('gateway_not_running');
-      card.innerHTML=`<div style="color:var(--muted);font-size:12px;display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#ef4444;display:inline-block"></span>${esc(statusLabel)}</div>`;
-      return;
-    }
-    const platformIcons={telegram:'💬',discord:'🎮',slack:'📝',web:'🌐',api:'🔌'};
-    let badges='';
-    if(r.platforms&&r.platforms.length){
-      badges=r.platforms.map(p=>{
-        const icon=platformIcons[p.name]||'📡';
-        return `<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;background:var(--code-bg);border:1px solid var(--border2);border-radius:12px;font-size:12px;font-weight:500">${icon} ${esc(p.label)}</span>`;
-      }).join(' ');
-    }
-    const lastActive=r.last_active?`<span style="font-size:11px;color:var(--muted)">${esc(t('gateway_last_active'))}${esc(new Date(r.last_active).toLocaleString())}</span>`:'';
-    const sessionInfo=r.session_count?`<span style="font-size:11px;color:var(--muted)">${esc(t('gateway_session_count',r.session_count))}</span>`:'';
-    card.innerHTML=`<div style="display:flex;align-items:center;gap:6px;margin-bottom:8px"><span style="width:8px;height:8px;border-radius:50%;background:#22c55e;display:inline-block"></span><span style="font-size:13px;font-weight:500;color:#22c55e">${esc(t('gateway_running_label'))}</span></div>${badges?`<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">${badges}</div>`:''}<div style="display:flex;gap:12px">${sessionInfo}${lastActive}</div>`;
-  }).catch(()=>{card.innerHTML=`<div style="color:#ef4444;font-size:12px">${esc(t('gateway_load_failed'))}</div>`});
+  return api('/api/gateway/status').then(r=>_renderGatewayStatus(r)).catch(()=>{card.innerHTML=`<div style="color:#ef4444;font-size:12px">${esc(t('gateway_status_load_failed'))}</div>`});
+}
+async function _gatewayAction(action){
+  if(_gatewayActionInFlight) return;
+  _gatewayActionInFlight=true;
+  const buttons=[...document.querySelectorAll('.gateway-action-btn')];
+  buttons.forEach(btn=>{btn.disabled=true;});
+  try{
+    const result=await api(`/api/gateway/${encodeURIComponent(action)}`,{method:'POST',body:JSON.stringify({}),timeoutMs:70000,timeoutToast:false});
+    if(typeof showToast==='function') showToast(result&&result.message?result.message:t(`gateway_${action}_success`),3000,'success');
+  }catch(e){
+    const msg=e&&e.message?e.message:String(e||'');
+    if(typeof showToast==='function') showToast(`${t(`gateway_${action}_failed`)}${msg?': '+msg:''}`,5000,'error');
+  }finally{
+    _gatewayActionInFlight=false;
+    await loadGatewayStatus();
+  }
 }
 // Load MCP servers when system settings tab opens
 const _origSwitchSettings=switchSettingsSection;
-switchSettingsSection=function(name){
-  _origSwitchSettings(name);
+switchSettingsSection=function(name, opts){
+  _origSwitchSettings(name, opts);
   if(name==='preferences') updateNotificationPermissionStatus();
   if(name==='system'){loadMcpServers();loadMcpTools();loadGatewayStatus();}
 };

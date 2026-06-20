@@ -48,13 +48,13 @@ def test_question_jump_expands_windowed_history_and_highlights_question():
     assert "msg-question-highlight" in UI_JS
 
 
-def test_question_jump_button_is_quiet_and_hidden_on_mobile():
+def test_question_jump_button_is_quiet_and_compact_on_mobile():
     assert ".msg-question-jump-btn" in STYLE_CSS
     assert "margin-left: auto;" in STYLE_CSS
     assert ".msg-question-highlight .msg-body" in STYLE_CSS
     assert "@keyframes question-highlight-pulse" in STYLE_CSS
     assert "@media (max-width: 600px)" in STYLE_CSS
-    assert ".msg-question-jump-btn { display: none; }" in STYLE_CSS
+    assert ".msg-question-jump-btn { padding: 3px 4px; }" in STYLE_CSS
 
 
 def test_question_jump_text_is_localized():

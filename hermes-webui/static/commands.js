@@ -547,7 +547,7 @@ async function cmdModel(args){
   // CLI resolves against the full catalog, so /model must too. (#3368)
   let modelsData=null;
   try {
-    const resp=await fetch('/api/models');
+    const resp=await fetch(new URL('api/models',document.baseURI||location.href).href);
     if(resp.ok){
       modelsData=await resp.json();
       const aliases=modelsData.aliases||{};
@@ -587,7 +587,7 @@ async function cmdModel(args){
     if(!match && !versionedNoSnap && S&&S.session&&S.session.session_id){
       const provider=q.slice(0,q.indexOf('/'));
       try{
-        const resp=await fetch('/api/session/update',{
+        const resp=await fetch(new URL('api/session/update',document.baseURI||location.href).href,{
           method:'POST',
           headers:{'Content-Type':'application/json'},
           body:JSON.stringify({

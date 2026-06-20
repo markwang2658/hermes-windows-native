@@ -51,7 +51,7 @@ def _run_node(script: str) -> dict:
         check=True,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=30,
     )
     return json.loads(result.stdout)
 

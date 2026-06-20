@@ -24,7 +24,7 @@ def _run_node(source: str) -> str:
         capture_output=True,
         encoding="utf-8",
         text=True,
-        timeout=10,
+        timeout=30,
     )
     if result.returncode != 0:
         raise RuntimeError(result.stderr)
@@ -419,6 +419,219 @@ console.log(JSON.stringify(rows));
     assert [row["session_id"] for row in rows] == ["telegram_parent", "webui_tip"]
     assert rows[1].get("_orphan_child_session") is True
     assert "_child_sessions" not in rows[0]
+
+
+def test_archived_hidden_parent_suppresses_child_and_fork_orphans():
+    """Archived parents should not leave child/delegate clutter behind (#4293)."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+var _showArchived = false;
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+const parent = {{session_id:'parent', title:'Archived parent', archived:true, updated_at:10, last_message_at:10}};
+const child = {{session_id:'child', title:'Child', parent_session_id:'parent', relationship_type:'child_session', updated_at:20, last_message_at:20}};
+const fork = {{session_id:'fork', title:'Fork', session_source:'fork', parent_session_id:'parent', updated_at:30, last_message_at:30}};
+const visibleRows = [child, fork];
+const referenceRows = [parent, child, fork];
+const rows = _attachChildSessionsToSidebarRows(visibleRows, visibleRows, referenceRows);
+console.log(JSON.stringify(rows));
+"""
+    assert json.loads(_run_node(source)) == []
+
+
+def test_archived_hidden_ancestor_suppresses_nested_child_and_fork_orphans():
+    """Nested descendants of an archived hidden parent must not leak as orphans (#4293)."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+var _showArchived = false;
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionLineageKey'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+const parent = {{session_id:'parent', title:'Archived parent', archived:true, updated_at:10, last_message_at:10}};
+const child = {{session_id:'child', title:'Child', parent_session_id:'parent', relationship_type:'child_session', updated_at:20, last_message_at:20}};
+const grandchild = {{session_id:'grandchild', title:'Grandchild', parent_session_id:'child', relationship_type:'child_session', updated_at:30, last_message_at:30}};
+const fork1 = {{session_id:'fork1', title:'Fork 1', session_source:'fork', parent_session_id:'parent', updated_at:40, last_message_at:40}};
+const fork2 = {{session_id:'fork2', title:'Fork 2', session_source:'fork', parent_session_id:'fork1', updated_at:50, last_message_at:50}};
+const visibleRows = [child, grandchild, fork1, fork2];
+const referenceRows = [parent, child, grandchild, fork1, fork2];
+const rows = _attachChildSessionsToSidebarRows(visibleRows, visibleRows, referenceRows);
+console.log(JSON.stringify(rows));
+"""
+    assert json.loads(_run_node(source)) == []
+
+
+def test_cross_project_archived_parent_does_not_hide_active_project_fork():
+    """Archived parents outside the active project must not suppress an active-project fork (#4293)."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+var _showArchived = false;
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionLineageKey'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+eval(extractFunc('_collapseSessionLineageForSidebar'));
+eval(extractFunc('_renderSidebarRowsFromRawSessions'));
+const otherProjectParent = {{session_id:'parent', title:'Other project parent', archived:true, project_id:'other', updated_at:10, last_message_at:10}};
+const activeProjectFork = {{session_id:'fork', title:'Active project fork', session_source:'fork', parent_session_id:'parent', project_id:'active', updated_at:20, last_message_at:20}};
+const activeProjectRows = [activeProjectFork];
+const activeProjectReferenceRows = [activeProjectFork];
+const crossProjectReferenceRows = [otherProjectParent, activeProjectFork];
+const correctRows = _renderSidebarRowsFromRawSessions(activeProjectRows, activeProjectReferenceRows);
+const wrongRows = _renderSidebarRowsFromRawSessions(activeProjectRows, crossProjectReferenceRows);
+console.log(JSON.stringify({{correctRows, wrongRows}}));
+"""
+    result = json.loads(_run_node(source))
+    assert [row["session_id"] for row in result["correctRows"]] == ["fork"]
+    assert "_orphan_child_session" not in result["correctRows"][0]
+    # This documents why render references must be active-project scoped: a
+    # cross-project archived parent would make the active-project fork vanish.
+    assert result["wrongRows"] == []
+
+
+def test_inactive_source_tab_count_uses_its_own_archived_parent_references():
+    """Inactive source-count renders must not borrow another source's reference rows (#4293)."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+var _showArchived = false;
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionLineageKey'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+eval(extractFunc('_collapseSessionLineageForSidebar'));
+eval(extractFunc('_renderSidebarRowsFromRawSessions'));
+const webuiParent = {{session_id:'webui-parent', title:'Archived WebUI parent', archived:true, updated_at:10, last_message_at:10}};
+const webuiChild = {{session_id:'webui-child', title:'WebUI child', parent_session_id:'webui-parent', relationship_type:'child_session', updated_at:20, last_message_at:20}};
+const cliParent = {{session_id:'cli-parent', title:'Archived CLI parent', archived:true, is_cli_session:true, session_source:'cli', updated_at:30, last_message_at:30}};
+const cliChild = {{session_id:'cli-child', title:'CLI child', parent_session_id:'cli-parent', relationship_type:'child_session', is_cli_session:true, session_source:'cli', updated_at:40, last_message_at:40}};
+const webuiVisibleRows = [webuiChild];
+const cliVisibleRows = [cliChild];
+const webuiReferenceRows = [webuiParent, webuiChild];
+const cliReferenceRows = [cliParent, cliChild];
+const wrongWebuiCount = _renderSidebarRowsFromRawSessions(webuiVisibleRows, cliReferenceRows).length;
+const rightWebuiCount = _renderSidebarRowsFromRawSessions(webuiVisibleRows, webuiReferenceRows).length;
+const wrongCliCount = _renderSidebarRowsFromRawSessions(cliVisibleRows, webuiReferenceRows).length;
+const rightCliCount = _renderSidebarRowsFromRawSessions(cliVisibleRows, cliReferenceRows).length;
+console.log(JSON.stringify({{wrongWebuiCount,rightWebuiCount,wrongCliCount,rightCliCount}}));
+"""
+    counts = json.loads(_run_node(source))
+    assert counts == {
+        "wrongWebuiCount": 1,
+        "rightWebuiCount": 0,
+        "wrongCliCount": 1,
+        "rightCliCount": 0,
+    }
+
+
+def test_child_archive_render_rebuild_drops_stale_decorated_children():
+    """A previous decorated parent copy must not retain an archived child (#4293)."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+const decoratedParent = {{
+  session_id:'parent',
+  title:'Parent',
+  updated_at:10,
+  last_message_at:10,
+  _child_sessions:[{{session_id:'archived-child', title:'Archived child'}}],
+  _child_session_count:1,
+  _child_session_streaming:true,
+  _child_session_has_unread:true,
+  _child_session_attention:{{kind:'approval', count:1}},
+}};
+const rows = _attachChildSessionsToSidebarRows([decoratedParent], [decoratedParent]);
+console.log(JSON.stringify(rows));
+"""
+    rows = json.loads(_run_node(source))
+    assert [row["session_id"] for row in rows] == ["parent"]
+    assert "_child_sessions" not in rows[0]
+    assert "_child_session_count" not in rows[0]
+    assert "_child_session_streaming" not in rows[0]
+    assert "_child_session_has_unread" not in rows[0]
+    assert "_child_session_attention" not in rows[0]
 
 
 def test_fork_child_with_visible_parent_is_nested_once():

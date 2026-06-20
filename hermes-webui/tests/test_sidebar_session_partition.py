@@ -31,10 +31,10 @@ def test_render_uses_single_pass_partition_helper():
     render_body = _function_block("renderSessionListFromCache")
 
     assert "_partitionSidebarSessionRows(allMatched, activeSidForSidebar)" in render_body
-    assert "_renderSidebarRowsFromRawSessions(sessionsRaw)" in render_body
+    assert "_renderSidebarRowsFromRawSessions(sessionsRaw, referenceRaw)" in render_body
     assert "? sessions.length" in render_body
-    assert ": _countRenderedSidebarRowsFromRawSessions(webuiSessionsRaw);" in render_body
-    assert ": _countRenderedSidebarRowsFromRawSessions(cliSessionsRaw);" in render_body
+    assert ": _renderSidebarRowsFromRawSessions(webuiSessionsRaw, webuiReferenceRaw).length;" in render_body
+    assert ": _renderSidebarRowsFromRawSessions(cliSessionsRaw, cliReferenceRaw).length;" in render_body
     assert "const count=filter==='cli'?renderedCliSessionCount:renderedWebuiSessionCount;" in render_body
     assert "const count=filter==='cli'?cliSessionCount:webuiSessionCount;" not in render_body
     assert "withMessages.filter(" not in render_body
@@ -60,11 +60,14 @@ def test_partition_helper_keeps_raw_source_counts_while_render_owns_visible_coun
 
     assert "webuiSessionCount," not in _partition_block()
     assert "cliSessionCount," in _partition_block()
+    assert "webuiReferenceRaw," in _partition_block()
+    assert "cliReferenceRaw," in _partition_block()
     assert "webuiSessionsRaw," in _partition_block()
     assert "cliSessionsRaw," in _partition_block()
     assert "const renderedWebuiSessionCount=" in render_body
     assert "const renderedCliSessionCount=" in render_body
-    helper_body = _function_block("_countRenderedSidebarRowsFromRawSessions")
-    assert "_renderSidebarRowsFromRawSessions(sessionsRaw).length;" in helper_body
-    assert "function _renderSidebarRowsFromRawSessions(sessionsRaw){" in SESSIONS_JS
-    assert "_attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw)" in SESSIONS_JS
+    assert "_renderSidebarRowsFromRawSessions(webuiSessionsRaw, webuiReferenceRaw).length" in render_body
+    assert "_renderSidebarRowsFromRawSessions(cliSessionsRaw, cliReferenceRaw).length" in render_body
+    assert "function _countRenderedSidebarRowsFromRawSessions" not in SESSIONS_JS
+    assert "function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw){" in SESSIONS_JS
+    assert "_attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw, referenceRows)" in SESSIONS_JS

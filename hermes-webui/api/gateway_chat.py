@@ -36,6 +36,7 @@ _STREAM_RUN_IDS: dict[str, str] = {}
 _WEBUI_CHAT_BACKEND_ENV = "HERMES_WEBUI_CHAT_BACKEND"
 _WEBUI_GATEWAY_BASE_URL_ENV = "HERMES_WEBUI_GATEWAY_BASE_URL"
 _WEBUI_GATEWAY_API_KEY_ENV = "HERMES_WEBUI_GATEWAY_API_KEY"
+_WEBUI_GATEWAY_USE_RUNS_API_ENV = "HERMES_WEBUI_GATEWAY_USE_RUNS_API"
 _GATEWAY_CHAT_BACKENDS = {"gateway", "api_server", "api-server"}
 
 
@@ -81,6 +82,18 @@ def _gateway_api_key(environ: dict[str, str] | None = None) -> str:
         or source.get("API_SERVER_KEY")
         or ""
     ).strip()
+
+
+def _gateway_use_runs_api_enabled(config_data=None, environ: dict[str, str] | None = None) -> bool:
+    """Return True only when the operator has explicitly opted into the runs API path."""
+    source = os.environ if environ is None else environ
+    cfg = config_data if isinstance(config_data, dict) else {}
+    raw = str(
+        source.get(_WEBUI_GATEWAY_USE_RUNS_API_ENV)
+        or cfg.get("webui_gateway_use_runs_api")
+        or ""
+    ).strip().lower()
+    return raw in ("1", "true", "yes", "on")
 
 
 def gateway_chat_config_status(config_data=None, environ: dict[str, str] | None = None) -> dict:
@@ -247,7 +260,7 @@ def _run_gateway_runs_api_streaming(
     session_id, msg_text, model, workspace, stream_id,
     base_url, api_key, prefill_messages, body_extras,
     *, put_gateway_event, cancel_event,
-    attachments=None, cfg=None,
+    attachments=None, cfg=None, session=None,
 ):
     """Submit via POST /v1/runs and relay SSE events including approval."""
     url_runs = f"{base_url.rstrip('/')}/v1/runs"
@@ -270,6 +283,15 @@ def _run_gateway_runs_api_streaming(
             message_content = str(msg_text or "")
     instructions_parts = []
     conversation_history = []
+    for entry in getattr(session, "context_messages", None) or []:
+        if not isinstance(entry, dict):
+            continue
+        role = str(entry.get("role") or "").strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        content = entry.get("content")
+        if content is not None:
+            conversation_history.append({"role": role, "content": content})
     for entry in prefill_messages or []:
         if not isinstance(entry, dict):
             continue
@@ -427,6 +449,7 @@ def _clear_gateway_pending_state(session: Any, stream_id: str) -> None:
     session.pending_user_message = None
     session.pending_attachments = None
     session.pending_started_at = None
+    session.pending_user_source = None
     session.save()
 
 
@@ -545,7 +568,7 @@ def _run_gateway_chat_streaming(
         base_url = _gateway_base_url(cfg)
         api_key = _gateway_api_key()
         # Capability gate: use runs API when gateway advertises approval support.
-        _use_runs_api = gateway_supports_approval(base_url, api_key)
+        _use_runs_api = _gateway_use_runs_api_enabled(cfg) and gateway_supports_approval(base_url, api_key)
         if _use_runs_api:
             body_extras = {}
             if model_provider:
@@ -558,6 +581,7 @@ def _run_gateway_chat_streaming(
                     cancel_event=cancel_event,
                     attachments=attachments,
                     cfg=cfg,
+                    session=s,
                 )
             except Exception as exc:
                 put_gateway_event("apperror", {
@@ -570,6 +594,18 @@ def _run_gateway_chat_streaming(
             if final_text is None:
                 return
         else:
+            # Legacy gateway path: emit unsupported approval notice once per session,
+            # but only when the gateway genuinely lacks approval capability.
+            if not gateway_supports_approval(base_url, api_key):
+                if not hasattr(s, "_approval_notice_emitted"):
+                    s._approval_notice_emitted = False
+                if not s._approval_notice_emitted:
+                    put_gateway_event("warning", {
+                        "type": "approval_gateway_unsupported",
+                        "message": "Approvals require a newer gateway. Upgrade the connected Hermes gateway to enable this.",
+                    })
+                    s._approval_notice_emitted = True
+
             url = f"{base_url}/v1/chat/completions"
             headers = {
                 "Content-Type": "application/json",
@@ -700,6 +736,9 @@ def _run_gateway_chat_streaming(
             # role/content ordering instead of turn order.
             assistant_ts = now + 0.000001
             user_msg = {"role": "user", "content": str(msg_text or ""), "timestamp": now}
+            pending_source = getattr(s, "pending_user_source", None) or "webui"
+            if pending_source != "webui":
+                user_msg["_source"] = pending_source
             if attachments:
                 user_msg["attachments"] = list(attachments)
             assistant_msg = {"role": "assistant", "content": assistant_text, "timestamp": assistant_ts}
@@ -731,6 +770,7 @@ def _run_gateway_chat_streaming(
                     previous_context,
                     s.context_messages,
                     str(msg_text or ""),
+                    source=pending_source,
                 )
             except Exception:
                 logger.debug("Failed to merge gateway display transcript", exc_info=True)
@@ -747,6 +787,7 @@ def _run_gateway_chat_streaming(
             s.pending_user_message = None
             s.pending_attachments = None
             s.pending_started_at = None
+            s.pending_user_source = None
             s.workspace = str(workspace)
             s.model = model
             s.model_provider = model_provider

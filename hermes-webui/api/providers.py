@@ -679,6 +679,7 @@ else:
     print(json.dumps(_fetch_snapshot(provider, api_key)), flush=True)
 """
 
+
 # SECTION: Provider ↔ env var mapping
 
 # Maps canonical provider slug → env var name for API key.
@@ -751,7 +752,201 @@ _OAUTH_PROVIDERS = frozenset({
     "xai-oauth",
 })
 
-# SECTION: Helper functions
+
+def _entry_value(entry, *names):
+    for name in names:
+        try:
+            value = getattr(entry, name)
+        except Exception:
+            value = None
+        if value in (None, ""):
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
+def _parse_dt(value):
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        except Exception:
+            return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _iso(value):
+    if value in (None, ""):
+        return None
+    if hasattr(value, "isoformat"):
+        text = value.isoformat()
+        return text.replace("+00:00", "Z")
+    text = str(value).strip()
+    return text or None
+
+
+def _entry_exhausted_ttl_seconds(error_code):
+    code = str(error_code or "").strip()
+    if code == "401":
+        return 5 * 60
+    return 60 * 60
+
+
+def _entry_pool_exhausted_until(entry):
+    if str(_entry_value(entry, "last_status") or "").strip().lower() != "exhausted":
+        return None
+    reset_at = _parse_dt(getattr(entry, "last_error_reset_at", None))
+    if reset_at is not None:
+        return reset_at
+    status_at = _parse_dt(getattr(entry, "last_status_at", None))
+    if status_at is None:
+        return None
+    return status_at + timedelta(seconds=_entry_exhausted_ttl_seconds(_entry_value(entry, "last_error_code")))
+
+
+def _entry_is_pool_exhausted(entry):
+    exhausted_until = _entry_pool_exhausted_until(entry)
+    return exhausted_until is not None and datetime.now(timezone.utc) < exhausted_until
+
+
+def _safe_entry_label(entry, index):
+    label = _entry_value(entry, "label", "source") or ""
+    if not label:
+        label = "Credential " + str(index)
+    label = " ".join(str(label).split())
+    if len(label) > 64:
+        label = label[:61].rstrip() + "..."
+    return label
+
+
+def _entry_pool_retry_after(entry):
+    return _iso(_entry_pool_exhausted_until(entry))
+
+
+def _entry_pool_exhausted_reason(entry):
+    code = _entry_value(entry, "last_error_code")
+    reset_at = _entry_pool_retry_after(entry)
+    reason = "Credential pool marked this credential exhausted"
+    if code:
+        reason += " after provider status " + code
+    if reset_at:
+        reason += "; retry after " + reset_at
+    return reason + "."
+
+
+def _local_pool_snapshot(provider):
+    """Probe-free pool snapshot from local auth.json entries.
+
+    Returns a SimpleNamespace compatible with _serialize_account_usage_snapshot,
+    or None if the provider has no pool or no entries.
+    """
+    try:
+        from agent.credential_pool import load_pool
+        from api.config import _is_ambient_gh_cli_entry
+
+        pool = load_pool(provider)
+        entries = list(pool.entries()) if pool is not None and hasattr(pool, "entries") else []
+    except Exception:
+        return None
+    if not entries:
+        return None
+
+    rows = []
+    available_count = 0
+    exhausted_count = 0
+    dead_count = 0
+    for index, entry in enumerate(entries, start=1):
+        source = str(_entry_value(entry, "source") or "")
+        label_val = str(_entry_value(entry, "label", "source") or "")
+        key_source = str(_entry_value(entry, "key_source") or "")
+        if _is_ambient_gh_cli_entry(source, label_val, key_source):
+            continue
+        label = _safe_entry_label(entry, index)
+        entry_status = str(_entry_value(entry, "last_status") or "").strip().lower()
+        if entry_status == "dead":
+            dead_count += 1
+            rows.append({
+                "label": label,
+                "status": "dead",
+                "plan": None,
+                "windows": [],
+                "details": [],
+                "unavailable_reason": "Credential permanently revoked or invalid.",
+                "retry_after": None,
+                "fetched_at": None,
+            })
+        elif _entry_is_pool_exhausted(entry):
+            exhausted_count += 1
+            rows.append({
+                "label": label,
+                "status": "exhausted",
+                "plan": None,
+                "windows": [],
+                "details": [],
+                "unavailable_reason": _entry_pool_exhausted_reason(entry),
+                "retry_after": _entry_pool_retry_after(entry),
+                "fetched_at": None,
+            })
+        else:
+            available_count += 1
+            rows.append({
+                "label": label,
+                "status": "available",
+                "plan": None,
+                "windows": [],
+                "details": [],
+                "unavailable_reason": None,
+                "retry_after": None,
+                "fetched_at": None,
+            })
+
+    if not rows:
+        return None
+
+    total = available_count + exhausted_count + dead_count
+    pool_dict = {
+        "total_credentials": total,
+        "queried_credentials": 0,
+        "available_credentials": available_count,
+        "exhausted_credentials": exhausted_count,
+        "dead_credentials": dead_count,
+        "failed_credentials": 0,
+        "plans": [],
+        "next_reset_at": None,
+        "best_remaining_by_window": [],
+        "credentials": rows,
+    }
+
+    details = [str(available_count) + "/" + str(total) + " credentials available"]
+    if exhausted_count:
+        details.append(str(exhausted_count) + " exhausted")
+    if dead_count:
+        details.append(str(dead_count) + " dead")
+
+    return SimpleNamespace(
+        provider=provider,
+        source="local_pool",
+        title="Credential pool",
+        plan=None,
+        windows=(),
+        details=tuple(details),
+        available=available_count > 0,
+        unavailable_reason=None if available_count > 0 else "All pool credentials are unavailable.",
+        fetched_at=datetime.now(timezone.utc),
+        pool=pool_dict,
+    )
 
 
 def _get_hermes_home() -> Path:
@@ -991,6 +1186,19 @@ def _provider_has_key(provider_id: str) -> bool:
                 return True
             if _provider_value_counts_as_api_key(provider_id, os.getenv(alias)):
                 return True
+    # Check credential pool — covers custom providers registered via
+    # `hermes auth add` which store keys in auth.json (not config.yaml).
+    # Must be outside the `if env_var:` block above: custom providers
+    # (custom:bothub, etc.) have no env var, so that block is skipped.
+    # Uses the cached _has_explicit_pool_credentials helper which also
+    # filters gh-cli / GITHUB_TOKEN ambient entries so copilot doesn't
+    # appear just because `gh` is installed.
+    try:
+        from api.config import _has_explicit_pool_credentials
+        if _has_explicit_pool_credentials(provider_id):
+            return True
+    except ImportError:
+        pass
 
     cfg = get_config()
     # Check model.api_key — only match if this provider is the active one.
@@ -1068,6 +1276,23 @@ def _get_provider_api_key(provider_id: str) -> str | None:
                     return os.getenv(cp_key[2:-1], "").strip() or None
                 if _provider_value_counts_as_api_key(provider_id, cp_key):
                     return cp_key
+    # Fallback: try credential pool (e.g. bothub key stored via auth.json)
+    try:
+        from api.config import _has_explicit_pool_credentials, _resolve_provider_alias
+        if _has_explicit_pool_credentials(provider_id):
+            from agent.credential_pool import load_pool
+            # Must resolve alias here too: _has_explicit_pool_credentials does it
+            # internally, but load_pool sees the original unresolved provider_id.
+            _resolved = _resolve_provider_alias(provider_id)
+            pool = load_pool(_resolved)
+            if pool:
+                entry = pool.select()
+                if entry:
+                    key = getattr(entry, "runtime_api_key", "") or getattr(entry, "access_token", "")
+                    if key:
+                        return key
+    except ImportError:
+        pass
     return None
 
 
@@ -1691,78 +1916,103 @@ def get_provider_quota(provider_id: str | None = None, *, refresh: bool = False)
     if provider in _ACCOUNT_USAGE_PROVIDERS:
         return _provider_account_usage_status(provider, display_name, refresh=refresh)
 
-    if provider != "openrouter":
-        detail = "OpenAI/Anthropic rate-limit headers are a follow-up once WebUI captures provider response metadata."
+    if provider == "openrouter":
+        api_key = _get_provider_api_key("openrouter")
+        if not api_key:
+            return {
+                "ok": False,
+                "provider": "openrouter",
+                "display_name": display_name,
+                "supported": True,
+                "status": "no_key",
+                "quota": None,
+                "message": "OpenRouter quota status needs an OPENROUTER_API_KEY configured on the server.",
+            }
+        req = urllib.request.Request(
+            _OPENROUTER_KEY_URL,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Accept": "application/json",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=_PROVIDER_QUOTA_TIMEOUT_SECONDS) as resp:
+                raw = resp.read()
+            payload = json.loads(raw.decode("utf-8")) if isinstance(raw, (bytes, bytearray)) else json.loads(raw)
+            quota = _sanitize_openrouter_quota(payload)
+            return {
+                "ok": True,
+                "provider": "openrouter",
+                "display_name": display_name,
+                "supported": True,
+                "status": "available",
+                "label": "OpenRouter credits",
+                "quota": quota,
+                "message": "OpenRouter quota status loaded.",
+            }
+        except urllib.error.HTTPError as exc:
+            status = "invalid_key" if exc.code in (401, 403) else "unavailable"
+            message = (
+                "OpenRouter rejected the configured API key."
+                if status == "invalid_key"
+                else "OpenRouter quota status is temporarily unavailable."
+            )
+            return {
+                "ok": False,
+                "provider": "openrouter",
+                "display_name": display_name,
+                "supported": True,
+                "status": status,
+                "quota": None,
+                "message": message,
+            }
+        except (TimeoutError, urllib.error.URLError, json.JSONDecodeError, OSError, ValueError):
+            return {
+                "ok": False,
+                "provider": "openrouter",
+                "display_name": display_name,
+                "supported": True,
+                "status": "unavailable",
+                "quota": None,
+                "message": "OpenRouter quota status is temporarily unavailable.",
+            }
+
+    local_snapshot = _local_pool_snapshot(provider)
+    if local_snapshot is not None:
+        account_limits = _serialize_account_usage_snapshot(local_snapshot)
+        if account_limits and account_limits.get("available"):
+            return {
+                "ok": True,
+                "provider": provider,
+                "display_name": display_name,
+                "supported": True,
+                "status": "available",
+                "label": account_limits.get("title") or "Credential pool",
+                "quota": None,
+                "account_limits": account_limits,
+                "message": f"{display_name} credential pool status loaded.",
+            }
         return {
             "ok": False,
             "provider": provider,
             "display_name": display_name,
-            "supported": False,
-            "status": "unsupported",
-            "quota": None,
-            "message": f"Quota status is not available for {display_name}. {detail}",
-        }
-
-    api_key = _get_provider_api_key("openrouter")
-    if not api_key:
-        return {
-            "ok": False,
-            "provider": "openrouter",
-            "display_name": display_name,
-            "supported": True,
-            "status": "no_key",
-            "quota": None,
-            "message": "OpenRouter quota status needs an OPENROUTER_API_KEY configured on the server.",
-        }
-
-    req = urllib.request.Request(
-        _OPENROUTER_KEY_URL,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Accept": "application/json",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=_PROVIDER_QUOTA_TIMEOUT_SECONDS) as resp:
-            raw = resp.read()
-        payload = json.loads(raw.decode("utf-8")) if isinstance(raw, (bytes, bytearray)) else json.loads(raw)
-        quota = _sanitize_openrouter_quota(payload)
-        return {
-            "ok": True,
-            "provider": "openrouter",
-            "display_name": display_name,
-            "supported": True,
-            "status": "available",
-            "label": "OpenRouter credits",
-            "quota": quota,
-            "message": "OpenRouter quota status loaded.",
-        }
-    except urllib.error.HTTPError as exc:
-        status = "invalid_key" if exc.code in (401, 403) else "unavailable"
-        message = (
-            "OpenRouter rejected the configured API key."
-            if status == "invalid_key"
-            else "OpenRouter quota status is temporarily unavailable."
-        )
-        return {
-            "ok": False,
-            "provider": "openrouter",
-            "display_name": display_name,
-            "supported": True,
-            "status": status,
-            "quota": None,
-            "message": message,
-        }
-    except (TimeoutError, urllib.error.URLError, json.JSONDecodeError, OSError, ValueError):
-        return {
-            "ok": False,
-            "provider": "openrouter",
-            "display_name": display_name,
             "supported": True,
             "status": "unavailable",
             "quota": None,
-            "message": "OpenRouter quota status is temporarily unavailable.",
+            "account_limits": account_limits,
+            "message": f"{display_name} credential pool: all credentials are unavailable.",
         }
+
+    detail = "OpenAI/Anthropic rate-limit headers are a follow-up once WebUI captures provider response metadata."
+    return {
+        "ok": False,
+        "provider": provider,
+        "display_name": display_name,
+        "supported": False,
+        "status": "unsupported",
+        "quota": None,
+        "message": f"Quota status is not available for {display_name}. {detail}",
+    }
 
 
 def _provider_is_oauth(provider_id: str) -> bool:
@@ -2343,6 +2593,14 @@ def get_providers() -> dict[str, Any]:
             if cp_api_key.startswith("${") and cp_api_key.endswith("}"):
                 env_var = cp_api_key[2:-1]
                 cp_has_key = bool(os.getenv(env_var, "").strip())
+            # Fallback: check credential pool (key added via hermes auth add)
+            if not cp_has_key:
+                try:
+                    from api.config import _has_explicit_pool_credentials
+                    if _has_explicit_pool_credentials(cp_id):
+                        cp_has_key = True
+                except ImportError:
+                    pass
             providers.append({
                 "id": cp_id,
                 "display_name": cp_name,

@@ -151,7 +151,7 @@ def test_gateway_runs_api_submission():
     mock_session.pending_started_at = None
 
     try:
-        with patch.dict("os.environ", {"HERMES_WEBUI_CHAT_BACKEND": "gateway"}):
+        with patch.dict("os.environ", {"HERMES_WEBUI_CHAT_BACKEND": "gateway", "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1"}):
             with patch("api.gateway_chat.gateway_supports_approval", lambda *_args, **_kwargs: True), \
                  patch("api.gateway_chat._run_gateway_runs_api_streaming", fake_runs_streaming), \
                  patch("api.gateway_chat.get_session", return_value=mock_session), \
@@ -415,7 +415,7 @@ def test_gateway_runs_api_cancel_does_not_emit_empty_response():
         return None, {}
 
     try:
-        with patch.dict("os.environ", {"HERMES_WEBUI_CHAT_BACKEND": "gateway"}):
+        with patch.dict("os.environ", {"HERMES_WEBUI_CHAT_BACKEND": "gateway", "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1"}):
             with patch("api.gateway_chat.gateway_supports_approval", return_value=True), \
                  patch("api.gateway_chat._run_gateway_runs_api_streaming", side_effect=fake_runs_streaming), \
                  patch("api.gateway_chat.get_session", return_value=mock_session):
@@ -470,8 +470,8 @@ def test_gateway_approval_response_relay():
         from api.routes import _handle_approval_respond
         _handle_approval_respond(handler, body)
 
-    assert captured.get("url", "") == "http://gw:8642/v1/runs/run%20abc%2F1/approvals/appr%20x%2Fy/respond"
-    assert captured["body"] == {"choice": "once"}
+    assert captured.get("url", "") == "http://gw:8642/v1/runs/run%20abc%2F1/approval"
+    assert captured["body"] == {"choice": "once", "approval_id": "appr x/y"}
     handler.send_response.assert_called_with(200)
 
     # Cleanup.

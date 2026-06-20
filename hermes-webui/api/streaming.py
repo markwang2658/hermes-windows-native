@@ -1174,6 +1174,7 @@ def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> Non
     session.pending_user_message = None
     session.pending_attachments = []
     session.pending_started_at = None
+    session.pending_user_source = None
     if not _session_has_cancel_marker(session):
         agent_name = _preferred_agent_display_name_for_session(session)
         session.messages.append({
@@ -1192,6 +1193,7 @@ def _cleanup_ephemeral_cancelled_turn(session) -> None:
     session.pending_user_message = None
     session.pending_attachments = []
     session.pending_started_at = None
+    session.pending_user_source = None
     try:
         import pathlib
         pathlib.Path(session.path).unlink(missing_ok=True)
@@ -1536,6 +1538,31 @@ def _bind_turn_session_identity(session_id: str):
         _reset_turn_session_identity(tokens)
 
 
+def _stale_completion_max_age_seconds() -> float:
+    """Max age (seconds) a background-process completion may sit in the queue
+    before the WebUI drain treats it as stale and drops it instead of
+    prepending it to the user's next turn.
+
+    Completions older than this are silently consumed (not requeued) so a
+    notification that finally fires long after the user moved on cannot
+    contaminate an unrelated later turn. See nesquena/hermes-webui#4029.
+
+    Configurable via HERMES_WEBUI_STALE_COMPLETION_MAX_AGE_SECONDS. A value of
+    0 (or negative) disables age-gating and restores the legacy drain-all
+    behavior. Defaults to 6 hours.
+    """
+    raw = os.environ.get("HERMES_WEBUI_STALE_COMPLETION_MAX_AGE_SECONDS")
+    if raw is not None:
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid HERMES_WEBUI_STALE_COMPLETION_MAX_AGE_SECONDS=%r; using default",
+                raw,
+            )
+    return 6 * 60 * 60  # 6 hours
+
+
 def _format_process_notification(evt: dict) -> str:
     """Format a completed background process notification for agent input."""
     if not isinstance(evt, dict):
@@ -1584,6 +1611,10 @@ def _drain_webui_process_notifications(session_id: str) -> list[str]:
     if completion_queue is None:
         return []
 
+    # Computed once per drain (not per event): reads/validates the env cap a
+    # single time so an invalid value logs at most one warning per drain.
+    stale_completion_max_age = _stale_completion_max_age_seconds()
+
     while True:
         try:
             evt = completion_queue.get_nowait()
@@ -1606,6 +1637,25 @@ def _drain_webui_process_notifications(session_id: str) -> list[str]:
         if getattr(proc, 'session_key', None) != session_id:
             skipped_events.append(evt)
             continue
+
+        # Age-gate stale completions: a completion that fires long after the
+        # user moved on must not be prepended to an unrelated later turn
+        # (nesquena/hermes-webui#4029). Drop (consume, do not requeue) any
+        # completion whose enqueue time is older than the configured cap.
+        # Events without a 'completed_at' (older agent builds) are never
+        # dropped here, preserving backward-compatible behavior.
+        if stale_completion_max_age > 0 and isinstance(evt, dict):
+            completed_at = evt.get('completed_at')
+            if isinstance(completed_at, (int, float)) and completed_at > 0:
+                age = time.time() - completed_at
+                if age > stale_completion_max_age:
+                    logger.info(
+                        "Dropping stale background-process completion for "
+                        "session %s (age %.0fs > cap %.0fs)",
+                        evt_sid, age, stale_completion_max_age,
+                    )
+                    _mark_process_completion_consumed(process_registry, evt_sid)
+                    continue
 
         notification = _format_process_notification(evt)
         if notification:
@@ -3217,10 +3267,12 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
             saved_pending_user_message = getattr(s, 'pending_user_message', None)
             saved_pending_attachments = list(getattr(s, 'pending_attachments', []) or [])
             saved_pending_started_at = getattr(s, 'pending_started_at', None)
+            saved_pending_user_source = getattr(s, 'pending_user_source', None)
             s.active_stream_id = None
             s.pending_user_message = None
             s.pending_attachments = []
             s.pending_started_at = None
+            s.pending_user_source = None
             try:
                 # skip_index=False so the snapshot appears in _index.json with
                 # the pre_compression_snapshot marker. The sidebar projection
@@ -3239,6 +3291,7 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
                 s.pending_user_message = saved_pending_user_message
                 s.pending_attachments = saved_pending_attachments
                 s.pending_started_at = saved_pending_started_at
+                s.pending_user_source = saved_pending_user_source
             return
         # Existing file is already at least as complete as memory; stamp only
         # the snapshot marker so index/sidebar projection can hide it without
@@ -3259,6 +3312,7 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
             snapshot.pending_user_message = None
             snapshot.pending_attachments = []
             snapshot.pending_started_at = None
+            snapshot.pending_user_source = None
             snapshot.save(touch_updated_at=False, skip_index=False)
             logger.info(
                 "Marked pre-compression session %s as sidebar-hidden snapshot",
@@ -3412,6 +3466,12 @@ def _sanitize_messages_for_api(messages, *, cfg: dict = None):
         # API 400 errors on strict providers (empty assistant content).
         if msg.get('_partial') and not str(msg.get('content') or '').strip():
             continue
+        # Note: _recovered user messages are NOT skipped here — they may need
+        # to be retained to preserve role alternation when a kept assistant
+        # follows.  The _recovered skip happens in a final pass after orphaned
+        # tool_calls are stripped, so the anchor check is exact (#4283).
+        # Temporarily mark _recovered users so the final pass can find them.
+        is_recovered = msg.get('_recovered') and msg.get('role') == 'user'
         role = msg.get('role')
         if role == 'tool':
             tid = msg.get('tool_call_id') or ''
@@ -3419,6 +3479,8 @@ def _sanitize_messages_for_api(messages, *, cfg: dict = None):
                 # Orphaned tool result — skip to avoid 400 from strict providers.
                 continue
         sanitized = {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS}
+        if is_recovered:
+            sanitized['_recovered'] = True  # temporary marker — stripped before return
         if strip_native_images and 'content' in sanitized:
             sanitized['content'] = _strip_native_image_parts_from_content(sanitized.get('content'))
         if sanitized.get('role'):
@@ -3451,7 +3513,35 @@ def _sanitize_messages_for_api(messages, *, cfg: dict = None):
             else:
                 msg = dict(msg, tool_calls=kept)
         filtered_clean.append(msg)
-    return filtered_clean
+
+    # Fourth pass: drop _recovered user messages unless removing one would fuse
+    # two same-role neighbours.  Operating on filtered_clean (post orphaned-tool/
+    # tool_calls stripping) means the neighbour check is exact (#4283).  The
+    # decision uses the ACTUAL kept sequence: the previously-kept message's role
+    # (`final[-1]`) and the next surviving message's role.  A _recovered user is
+    # kept ONLY when it separates two assistants (prev kept == assistant AND next
+    # surviving == assistant) — i.e. it is an answered turn whose removal would
+    # leave `assistant, assistant` adjacency.  In every other case dropping it is
+    # safe and correct: it would either leave a clean `user, assistant` pair, or
+    # (if next is a user) it is a stale unanswered prompt that must not replay.
+    # Deciding only on "an assistant follows" (ignoring the prev kept role) is the
+    # bug that re-introduced `user, _recovered user, assistant` → adjacent users
+    # → strict-provider 400 once the anchoring assistant's predecessor was a user.
+    final = []
+    for i, msg in enumerate(filtered_clean):
+        if msg.get('_recovered') and msg.get('role') == 'user':
+            prev_role = final[-1].get('role') if final else None
+            next_role = None
+            for j in range(i + 1, len(filtered_clean)):
+                next_role = filtered_clean[j].get('role')
+                break
+            # Keep only if this recovered user actually separates two assistants.
+            if not (prev_role == 'assistant' and next_role == 'assistant'):
+                continue  # drop — fusing the neighbours is clean, or it's a stale prompt
+            # Keep but strip the temporary marker
+            msg = {k: v for k, v in msg.items() if k != '_recovered'}
+        final.append(msg)
+    return final
 
 
 def _api_safe_message_positions(messages):
@@ -3477,12 +3567,17 @@ def _api_safe_message_positions(messages):
             continue
         if msg.get('_partial') and not str(msg.get('content') or '').strip():
             continue
+        # Note: _recovered user messages are NOT skipped here — deferred to
+        # a final pass after orphaned tool_calls stripping (#4283).
+        is_recovered = msg.get('_recovered') and msg.get('role') == 'user'
         role = msg.get('role')
         if role == 'tool':
             tid = msg.get('tool_call_id') or ''
             if not tid or tid not in valid_tool_call_ids:
                 continue
         sanitized = {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS}
+        if is_recovered:
+            sanitized['_recovered'] = True  # temporary marker — stripped before return
         if sanitized.get('role'):
             out.append((idx, sanitized))
 
@@ -3510,7 +3605,24 @@ def _api_safe_message_positions(messages):
             else:
                 msg = dict(msg, tool_calls=kept)
         filtered_out.append((idx, msg))
-    return filtered_out
+
+    # Fourth pass: drop _recovered user messages unless removing one would fuse
+    # two same-role neighbours — mirrors _sanitize_messages_for_api pass 4 (#4283).
+    # Decide on the ACTUAL kept sequence: prev kept role (final_out[-1]) + next
+    # surviving role. Keep ONLY when it separates two assistants; otherwise drop.
+    final_out = []
+    for i, (idx, msg) in enumerate(filtered_out):
+        if msg.get('_recovered') and msg.get('role') == 'user':
+            prev_role = final_out[-1][1].get('role') if final_out else None
+            next_role = None
+            for j in range(i + 1, len(filtered_out)):
+                next_role = filtered_out[j][1].get('role')
+                break
+            if not (prev_role == 'assistant' and next_role == 'assistant'):
+                continue
+            msg = {k: v for k, v in msg.items() if k != '_recovered'}
+        final_out.append((idx, msg))
+    return final_out
 
 
 def _deduplicate_context_messages(messages):
@@ -3778,24 +3890,69 @@ def _strip_replayed_context_items(existing_messages, candidates):
     return cleaned
 
 
-def _dedupe_replayed_context_messages(previous_context, result_messages):
+def _dedupe_replayed_context_messages(previous_context, result_messages, msg_text=None):
     """Keep model context append-only without replayed blocks/summaries."""
     previous_context = list(previous_context or [])
     result_messages = list(result_messages or [])
     if not previous_context or not result_messages:
         return result_messages
+    previous_user_tail = _stale_user_tail_candidate(_last_user_row(previous_context))
     if not _messages_have_prefix(result_messages, previous_context):
+        # Agent-side role-sequence repair can replace the last prior user row
+        # with a repaired current-user row. In that shape the result no longer
+        # has `previous_context` as an exact prefix, but it should still be
+        # merged as: previous context + clean current turn + assistant/tool delta.
+        if (
+            msg_text
+            and len(previous_context) >= 1
+            and len(result_messages) >= len(previous_context)
+            and _messages_have_prefix(result_messages, previous_context[:-1])
+        ):
+            boundary_idx = len(previous_context) - 1
+            boundary_row = result_messages[boundary_idx]
+            is_stale_merge = bool(
+                previous_user_tail
+                and _detect_stale_user_merge(
+                    boundary_row,
+                    msg_text,
+                    previous_user_tail,
+                    previous_context=previous_context,
+                )
+            )
+            if is_stale_merge or _looks_like_current_user_turn(boundary_row, msg_text):
+                if is_stale_merge:
+                    # Clean only the stale-merged boundary row; leave all prior
+                    # history in previous_context untouched.
+                    cleaned_boundary = copy.deepcopy(boundary_row)
+                    cleaned_boundary['content'] = msg_text
+                    candidates = [cleaned_boundary] + result_messages[boundary_idx + 1:]
+                else:
+                    candidates = result_messages[boundary_idx:]
+                candidates = _strip_replayed_prefix(previous_context, candidates)
+                if candidates:
+                    candidates = _strip_replayed_context_items(previous_context, candidates)
+                return previous_context + candidates
         return result_messages
     candidates = result_messages[len(previous_context):]
+    # Strip stale merges only from the new-turn candidate slice so that
+    # legitimate historical user rows in the already-committed previous_context
+    # prefix are never rewritten.
+    if msg_text and previous_user_tail:
+        candidates = _strip_stale_user_merge_from_messages(
+            candidates,
+            msg_text,
+            previous_user_tail,
+            previous_context=previous_context,
+        )
     candidates = _strip_replayed_prefix(previous_context, candidates)
     if candidates:
         candidates = _strip_replayed_context_items(previous_context, candidates)
     return previous_context + candidates
 
 
-def _dedupe_replayed_active_context(previous_context, result_messages):
+def _dedupe_replayed_active_context(previous_context, result_messages, msg_text=None):
     """Keep model context append-only without re-appending a replayed tail."""
-    return _dedupe_replayed_context_messages(previous_context, result_messages)
+    return _dedupe_replayed_context_messages(previous_context, result_messages, msg_text)
 
 
 def _is_context_compression_marker(msg):
@@ -3891,6 +4048,215 @@ def _drop_checkpointed_current_user_from_context(messages, msg_text):
     if current_user_key and _message_identity(history[-1]) == current_user_key:
         return history[:-1]
     return history
+
+
+def _strip_workspace_prefixes_for_compare(text: str) -> str:
+    """Remove WebUI workspace sentinels anywhere before text comparison."""
+    value = _strip_workspace_prefix(text, include_legacy=True)
+    for pattern in (_WORKSPACE_PREFIX_ANY_RE, _LEGACY_WORKSPACE_PREFIX_ANY_RE):
+        value = pattern.sub('', value)
+    return value.strip()
+
+
+def _normalize_user_text(text):
+    """Collapse whitespace and strip workspace sentinels for tail comparisons."""
+    if not isinstance(text, str):
+        return ""
+    return " ".join(_strip_workspace_prefixes_for_compare(text).split())
+
+
+def _raw_message_text(value) -> str:
+    """Extract text from a message content payload without stripping markup.
+
+    Used for the stale-user-merge detector so the literal boundary between
+    the prior tail and the current turn survives into the comparison. The
+    thinking-markup strip in ``_message_text`` collapses newlines, which
+    would defeat the boundary check.
+    """
+    if isinstance(value, list):
+        return ' '.join(
+            str(p.get('text') or p.get('content') or '')
+            for p in value
+            if isinstance(p, dict)
+        )
+    return str(value or '')
+
+
+def _stale_user_tail_candidate(msg):
+    """Return normalized text if msg is a user row that could be a stale tail."""
+    if not isinstance(msg, dict) or msg.get('role') != 'user':
+        return None
+    raw = _raw_message_text(msg.get('content', ''))
+    if not raw.strip():
+        return None
+    return _normalize_user_text(raw)
+
+
+def _last_user_row(messages):
+    """Return the last user-role row in `messages`, or None."""
+    for msg in reversed(list(messages or [])):
+        if isinstance(msg, dict) and msg.get('role') == 'user':
+            return msg
+    return None
+
+
+def _stale_prefix_matches_prior_user_context(stale_prefix, stale_segments, previous_context):
+    """Return True when a stale prefix is explainable by prior user context.
+
+    First-generation repair usually produces segments matching consecutive
+    prior user rows. Once a session is already contaminated, later repair can
+    replay a stable stale prefix from an older polluted row even after newer
+    clean user turns have moved the context tail forward. Handle both shapes
+    while still requiring all evidence to come from prior user-role rows.
+    """
+    prior_rows = [
+        _stale_user_tail_candidate(msg)
+        for msg in previous_context or []
+    ]
+    prior_rows = [row for row in prior_rows if row]
+    if not prior_rows:
+        return False
+
+    if stale_segments:
+        segment_count = len(stale_segments)
+        for start in range(0, len(prior_rows) - segment_count + 1):
+            if prior_rows[start:start + segment_count] == stale_segments:
+                return True
+
+        # Already-polluted sessions may replay paragraphs from older polluted
+        # rows after newer clean turns have advanced the context tail. In that
+        # shape the stale paragraphs are still all prior user content, but they
+        # are substrings within older merged rows rather than standalone rows.
+        #
+        # NOTE: this substring match is intentionally loose (a stale segment can
+        # coincidentally appear inside an unrelated prior row). Correctness does
+        # NOT depend on it being precise — the caller (_detect_stale_user_merge)
+        # only reaches here once the row's suffix already normalizes to the
+        # ENTIRE submitted turn, so anything this branch flags has a prefix that
+        # is extra-to-the-submission. Cleaning therefore only ever rewrites the
+        # row to the user's actual current turn; it can never drop legitimate
+        # current-turn content even on a coincidental substring hit.
+        row_index = 0
+        row_offset = 0
+        matched_all_segments = True
+        for segment in stale_segments:
+            matched_segment = False
+            while row_index < len(prior_rows):
+                row = prior_rows[row_index]
+                pos = row.find(segment, row_offset)
+                if pos >= 0:
+                    row_offset = pos + len(segment)
+                    matched_segment = True
+                    break
+                row_index += 1
+                row_offset = 0
+            if not matched_segment:
+                matched_all_segments = False
+                break
+        if matched_all_segments:
+            return True
+
+    prefix_norm = _normalize_user_text(stale_prefix)
+    if not prefix_norm:
+        return False
+    for row in prior_rows:
+        if row == prefix_norm or row.startswith(f'{prefix_norm} '):
+            return True
+    return False
+
+
+def _detect_stale_user_merge(message, msg_text, previous_user_tail, previous_context=None):
+    """Return True if `message` is the current user turn with a stale prefix merged in.
+
+    The agent's defensive repair path can concatenate prior user context with
+    the submitted current turn as ``<stale>\\n\\n<current>``. The stale portion
+    can be either the immediate prior user tail or a replayed prefix from an
+    older already-polluted user row. The literal ``\\n\\n`` boundary must survive
+    into the comparison; a single-newline or space-only join is not the repair
+    shape and must not match. Workspace sentinels may be present on either or
+    both halves and are stripped before comparison.
+    """
+    if not isinstance(message, dict) or message.get('role') != 'user':
+        return False
+    current_norm = _normalize_user_text(msg_text)
+    if not current_norm:
+        return False
+
+    merged = _raw_message_text(message.get('content', '')).replace("\r\n", "\n")
+    if "\n\n" not in merged:
+        return False
+
+    # The user's current turn can itself contain paragraph breaks. Find a repair
+    # boundary whose suffix normalizes to the *entire* submitted turn, then treat
+    # only the prefix as stale context. A plain split-and-last-segment check would
+    # miss ``<stale>\n\n<current paragraph A>\n\n<current paragraph B>``.
+    stale_segments = []
+    stale_prefix = ''
+    search_end = len(merged)
+    while search_end > 0:
+        boundary_idx = merged.rfind("\n\n", 0, search_end)
+        if boundary_idx < 0:
+            break
+        suffix = merged[boundary_idx + 2:]
+        if _normalize_user_text(suffix) == current_norm:
+            prefix = merged[:boundary_idx]
+            candidate_segments = [
+                _normalize_user_text(segment)
+                for segment in prefix.split("\n\n")
+            ]
+            if candidate_segments and all(candidate_segments):
+                stale_segments = candidate_segments
+                stale_prefix = prefix
+                break
+            # The suffix matched the submitted turn, but this boundary leaves
+            # blank prefix segments; try the next candidate boundary to the left.
+        search_end = boundary_idx
+    if not stale_segments:
+        return False
+
+    if previous_context is not None and _stale_prefix_matches_prior_user_context(
+        stale_prefix,
+        stale_segments,
+        previous_context,
+    ):
+        return True
+
+    return bool(
+        previous_context is None
+        and len(stale_segments) == 1
+        and _normalize_user_text(previous_user_tail) == stale_segments[0]
+    )
+
+
+def _strip_stale_user_merge_from_messages(
+    messages,
+    msg_text,
+    previous_user_tail,
+    previous_context=None,
+):
+    """Return messages with stale-prefixed current user turns replaced by clean ones.
+
+    Both context-merge (model-facing) and display-merge (visible transcript)
+    callers funnel through this so a single detection rule governs persistence.
+    The current user row is replaced with a clean copy using `msg_text` so the
+    displayed bubble matches what the human submitted, never the polluted pair.
+    """
+    if not messages or not msg_text:
+        return messages
+    out = []
+    for msg in messages:
+        if _detect_stale_user_merge(
+            msg,
+            msg_text,
+            previous_user_tail,
+            previous_context=previous_context,
+        ):
+            cleaned = copy.deepcopy(msg) if isinstance(msg, dict) else {'role': 'user', 'content': msg_text}
+            cleaned['content'] = msg_text
+            out.append(cleaned)
+        else:
+            out.append(msg)
+    return out
 
 
 def _save_streaming_checkpoint(session):
@@ -4064,7 +4430,7 @@ def _retire_truncation_watermark_after_commit(session) -> None:
         session.truncation_watermark = None
 
 
-def _merge_display_messages_after_agent_result(previous_display, previous_context, result_messages, msg_text):
+def _merge_display_messages_after_agent_result(previous_display, previous_context, result_messages, msg_text, source: str = "webui"):
     """Keep UI transcript durable while allowing model context to compact.
 
     If Hermes Agent returns a normal append-only history, append that delta to
@@ -4101,6 +4467,7 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
     result_messages = list(result_messages or [])
     if not result_messages:
         return previous_display
+    previous_user_tail = _stale_user_tail_candidate(_last_user_row(previous_context))
 
     # ── Backfill normal turns from previous_context that are missing from
     # previous_display.  After context compression recovery, previous_context
@@ -4123,6 +4490,19 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
         _has_context_only_turns = bool(_context_id_set - _display_id_set)
         if _has_context_only_turns:
             context_keys = [_message_identity(m) for m in previous_context]
+            # Precompute display keys once; avoids repeated json.dumps calls inside
+            # the inner any() loop (was O(D²·C) — see perf fix below).
+            _display_keys = [_message_identity(m) for m in previous_display]
+            # Multiset mirror of context_keys[_cursor:] kept in sync as _cursor
+            # advances. Enables O(1) membership tests in the any() check instead
+            # of an O(N) list scan, while preserving EXACT list-slice semantics:
+            # _message_identity intentionally returns duplicate keys for
+            # identical-content turns (and None for empty rows), so a plain set
+            # would drop a key still present later in the slice. A count-keyed
+            # dict (including None) matches `in context_keys[_cursor:]` exactly.
+            _remaining_ck_counts = {}
+            for _ck in context_keys:
+                _remaining_ck_counts[_ck] = _remaining_ck_counts.get(_ck, 0) + 1
             _backfilled = []
             # #3300 fix: track ONLY context rows we splice in, so the
             # visible-display backbone is never suppressed. Sharing one set
@@ -4134,7 +4514,7 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
             _context_inserted = set()
             _cursor = 0
             for _display_idx, _dmsg in enumerate(previous_display):
-                _dkey = _message_identity(_dmsg)
+                _dkey = _display_keys[_display_idx]
                 if _dkey is not None:
                     _j = _cursor
                     while _j < len(context_keys) and context_keys[_j] != _dkey:
@@ -4146,10 +4526,20 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
                             if _ckey is not None and _ckey not in _context_inserted and _ckey not in _display_id_set and not _is_context_compression_marker(_cmsg):
                                 _backfilled.append(copy.deepcopy(_cmsg))
                                 _context_inserted.add(_ckey)
+                        # Sync multiset: decrement keys consumed by advancing
+                        # the cursor to _j+1 (delete at zero so membership matches
+                        # the list slice exactly).
+                        for _k in range(_cursor, _j + 1):
+                            _consumed_ck = context_keys[_k]
+                            _ck_n = _remaining_ck_counts.get(_consumed_ck, 0) - 1
+                            if _ck_n <= 0:
+                                _remaining_ck_counts.pop(_consumed_ck, None)
+                            else:
+                                _remaining_ck_counts[_consumed_ck] = _ck_n
                         _cursor = _j + 1
                     elif not any(
-                        _message_identity(_future_dmsg) in context_keys[_cursor:]
-                        for _future_dmsg in previous_display[_display_idx + 1:]
+                        _display_keys[_fi] in _remaining_ck_counts
+                        for _fi in range(_display_idx + 1, len(_display_keys))
                     ):
                         for _k in range(_cursor, len(context_keys)):
                             _ckey = context_keys[_k]
@@ -4158,6 +4548,7 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
                                 _backfilled.append(copy.deepcopy(_cmsg))
                                 _context_inserted.add(_ckey)
                         _cursor = len(context_keys)
+                        _remaining_ck_counts.clear()
                 # The display row is the visible backbone — always preserve it,
                 # in order, even when an earlier (identical-content) turn or a
                 # backfilled context row shares its timestamp-less identity.
@@ -4180,6 +4571,15 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
 
     if _messages_have_prefix(result_messages, previous_context):
         candidates = result_messages[len(previous_context):]
+        # Normalize stale merges only in the new-turn slice; never rewrite
+        # historical rows in the already-committed previous_context prefix.
+        if msg_text and previous_user_tail:
+            candidates = _strip_stale_user_merge_from_messages(
+                candidates,
+                msg_text,
+                previous_user_tail,
+                previous_context=previous_context,
+            )
         candidates = _strip_replayed_prefix(previous_display, candidates)
         candidates = _strip_replayed_prefix(previous_context, candidates)
     else:
@@ -4189,6 +4589,14 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
             if _is_context_compression_marker(m)
         ]
         turn_candidates = result_messages[current_user_idx:] if current_user_idx is not None else []
+        # Normalize stale merges only in the current-turn slice.
+        if msg_text and previous_user_tail:
+            turn_candidates = _strip_stale_user_merge_from_messages(
+                turn_candidates,
+                msg_text,
+                previous_user_tail,
+                previous_context=previous_context,
+            )
         candidates = marker_candidates + turn_candidates
 
     merged = previous_display[:]
@@ -4221,6 +4629,8 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
         # exchange and then clear the pending prompt. Materialize the current
         # turn at the transcript boundary before the assistant/tool response.
         current_user_msg = {'role': 'user', 'content': msg_text}
+        if source and source != 'webui':
+            current_user_msg['_source'] = source
         insert_at = 0
         while insert_at < len(candidates) and _is_context_compression_marker(candidates[insert_at]):
             insert_at += 1
@@ -4264,6 +4674,8 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
         ):
             display_msg = copy.deepcopy(msg)
             display_msg['content'] = msg_text
+            if source and source != 'webui':
+                display_msg['_source'] = source
         merged.append(copy.deepcopy(display_msg))
         if key is not None:
             seen.add(key)
@@ -4655,10 +5067,30 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
         'timestamp': recovered_ts,
         '_recovered': True,
     }
+    pending_source = getattr(session, 'pending_user_source', None)
+    if pending_source and pending_source != 'webui':
+        recovered['_source'] = pending_source
     pending_attachments = getattr(session, 'pending_attachments', None)
     if pending_attachments:
         recovered['attachments'] = list(pending_attachments)
     session.messages.append(recovered)
+    # Mirror to context_messages so the _recovered flag survives the state.db
+    # round-trip (#4283).  state.db has no _recovered column, so without this
+    # mirror the next turn's reconciled_state_db_messages_for_session(
+    # prefer_context=True) finds the recovered user as a flagless state.db
+    # delta and _sanitize_messages_for_api cannot filter it — causing the
+    # interrupted turn's prompt to be prepended to every subsequent turn.
+    # Placing the mirror here (rather than in _persist_cancelled_turn) covers
+    # all three callers: cancel, provider-error, and exception paths.
+    ctx = getattr(session, 'context_messages', None)
+    if isinstance(ctx, list) and ctx:
+        rec_text = " ".join(str(recovered.get('content') or '').split())
+        if not any(
+            isinstance(e, dict) and e.get('role') == 'user'
+            and " ".join(str(e.get('content') or '').split()) == rec_text
+            for e in ctx[-8:]
+        ):
+            ctx.append({k: v for k, v in recovered.items() if k != 'timestamp'})
     # The new user turn is now committed to messages (#3831): retire a positive
     # truncation watermark left over from a prior retry/undo/edit so it cannot
     # freeze at the old edit boundary and later drop these post-edit turns on an
@@ -5512,6 +5944,7 @@ def _run_agent_streaming(
         # process-level active-profile global.  Falls back gracefully.
         try:
             from api.profiles import (
+                filter_runtime_env_for_gateway_parity,
                 patch_skill_home_modules,
                 get_hermes_home_for_profile,
                 get_profile_runtime_env,
@@ -5519,9 +5952,11 @@ def _run_agent_streaming(
             _profile_home_path = get_hermes_home_for_profile(getattr(s, 'profile', None))
             _profile_home = str(_profile_home_path)
             _profile_runtime_env = get_profile_runtime_env(_profile_home_path)
+            _safe_profile_runtime_env = filter_runtime_env_for_gateway_parity(_profile_runtime_env)
         except ImportError:
             _profile_home = os.environ.get('HERMES_HOME', '')
             _profile_runtime_env = {}
+            _safe_profile_runtime_env = {}
             patch_skill_home_modules = None
 
         # Profile-aware provider/model enrichment: when the session belongs
@@ -5578,7 +6013,7 @@ def _run_agent_streaming(
         # The finally block re-acquires to restore — keeping critical sections short
         # and preventing a deadlock where the restore would re-enter the same lock.
         with _ENV_LOCK:
-            old_profile_env = {key: os.environ.get(key) for key in _profile_runtime_env}
+            old_profile_env = {key: os.environ.get(key) for key in _safe_profile_runtime_env}
             old_cwd = os.environ.get('TERMINAL_CWD')
             old_exec_ask = os.environ.get('HERMES_EXEC_ASK')
             old_session_key = os.environ.get('HERMES_SESSION_KEY')
@@ -5586,7 +6021,7 @@ def _run_agent_streaming(
             old_session_platform = os.environ.get('HERMES_SESSION_PLATFORM')
             old_session_chat_id = os.environ.get('HERMES_SESSION_CHAT_ID')
             old_hermes_home = os.environ.get('HERMES_HOME')
-            os.environ.update(_profile_runtime_env)
+            os.environ.update(_safe_profile_runtime_env)
             os.environ['TERMINAL_CWD'] = str(s.workspace)
             os.environ['HERMES_EXEC_ASK'] = '1'
             os.environ['HERMES_SESSION_KEY'] = session_id
@@ -6834,6 +7269,7 @@ def _run_agent_streaming(
                 _next_context_messages = _dedupe_replayed_context_messages(
                     _previous_context_messages,
                     _next_context_messages,
+                    msg_text,
                 )
                 s.context_messages = _deduplicate_context_messages(_next_context_messages)
                 s.messages = _merge_display_messages_after_agent_result(
@@ -6841,6 +7277,7 @@ def _run_agent_streaming(
                     _previous_context_messages,
                     _restore_display_reasoning_metadata(_previous_messages, _result_messages),
                     msg_text,
+                    source=getattr(s, 'pending_user_source', None) or 'webui',
                 )
                 _retire_truncation_watermark_after_commit(s)  # #3831
                 # Strip XML tool-call blocks from assistant message content.
@@ -7125,6 +7562,7 @@ def _run_agent_streaming(
                                 _next_context_messages = _dedupe_replayed_context_messages(
                                     _previous_context_messages,
                                     _next_context_messages,
+                                    msg_text,
                                 )
                                 s.context_messages = _deduplicate_context_messages(_next_context_messages)
                                 s.messages = _merge_display_messages_after_agent_result(
@@ -7132,6 +7570,7 @@ def _run_agent_streaming(
                                     _previous_context_messages,
                                     _restore_reasoning_metadata(_previous_messages, _result_messages),
                                     msg_text,
+                                    source=getattr(s, 'pending_user_source', None) or 'webui',
                                 )
                                 _retire_truncation_watermark_after_commit(s)  # #3831
                                 # Skip the error block — jump directly to the
@@ -7187,6 +7626,7 @@ def _run_agent_streaming(
                         s.pending_user_message = None
                         s.pending_attachments = []
                         s.pending_started_at = None
+                        s.pending_user_source = None
                         try:
                             _snapshot_and_append_partial_on_error(s, stream_id)
                         except Exception:
@@ -7367,6 +7807,7 @@ def _run_agent_streaming(
                 s.pending_user_message = None
                 s.pending_attachments = []
                 s.pending_started_at = None
+                s.pending_user_source = None
                 # Tag the matching user message with attachment filenames for display on reload
                 # Only tag a user message whose content relates to this turn's text
                 # (msg_text is the full message including the [Attached files: ...] suffix)
@@ -8104,6 +8545,7 @@ def _run_agent_streaming(
                                 _next_context_messages = _dedupe_replayed_context_messages(
                                     _previous_context_messages,
                                     _next_context_messages,
+                                    msg_text,
                                 )
                                 s.context_messages = _deduplicate_context_messages(_next_context_messages)
                                 s.messages = _merge_display_messages_after_agent_result(
@@ -8111,6 +8553,7 @@ def _run_agent_streaming(
                                     _previous_context_messages,
                                     _restore_reasoning_metadata(_previous_messages, _result_messages),
                                     msg_text,
+                                    source=getattr(s, 'pending_user_source', None) or 'webui',
                                 )
                                 _retire_truncation_watermark_after_commit(s)  # #3831
                                 s.save()
@@ -8161,6 +8604,7 @@ def _run_agent_streaming(
                 s.pending_user_message = None
                 s.pending_attachments = []
                 s.pending_started_at = None
+                s.pending_user_source = None
                 try:
                     _snapshot_and_append_partial_on_error(s, stream_id)
                 except Exception:
@@ -8459,6 +8903,11 @@ def cancel_stream(stream_id: str) -> bool:
         if active_run_entry and not active_run_session_id:
             active_run_session_id = str(active_run_entry.get("session_id") or "").strip() or None
 
+    # Mark the worker lifecycle registry immediately. The SSE maps may be popped
+    # below while the worker is still unwinding; ACTIVE_RUNS is what recovery /
+    # health polling sees during that detached window.
+    update_active_run(stream_id, phase="cancelling")
+
     # Set WebUI layer cancel flag. Prefer the snapshot captured under the lock;
     # fall back to a fresh lookup for the ACTIVE_RUNS-only path (stream absent).
     flag = _snap_flag if _snap_flag is not None else cancel_flags.get(stream_id)
@@ -8598,6 +9047,7 @@ def cancel_stream(stream_id: str) -> bool:
                 # the cleanup.
                 try:
                     _pending_user = getattr(_cs, 'pending_user_message', None)
+                    _pending_source = getattr(_cs, 'pending_user_source', None)
                     _pending_atts_raw = getattr(_cs, 'pending_attachments', None)
                     _pending_atts = list(_pending_atts_raw) if isinstance(_pending_atts_raw, (list, tuple)) else []
                     _pending_started = getattr(_cs, 'pending_started_at', None) or 0
@@ -8623,11 +9073,16 @@ def cancel_stream(stream_id: str) -> bool:
                                 if _pending_user == _last_content or _pending_user in _last_content:
                                     _already_persisted = True
                         if not _already_persisted:
+                            _recovered_ts = int(time.time())
+                            if isinstance(_pending_started, (int, float)) and _pending_started > 0:
+                                _recovered_ts = int(_pending_started)
                             _user_turn: dict = {
                                 'role': 'user',
                                 'content': _pending_user,
-                                'timestamp': int(time.time()),
+                                'timestamp': _recovered_ts,
                             }
+                            if _pending_source and _pending_source != 'webui':
+                                _user_turn['_source'] = _pending_source
                             if _pending_atts:
                                 _user_turn['attachments'] = _pending_atts
                             _msgs_for_recovery.append(_user_turn)
@@ -8640,6 +9095,7 @@ def cancel_stream(stream_id: str) -> bool:
                 _cs.pending_user_message = None
                 _cs.pending_attachments = []
                 _cs.pending_started_at = None
+                _cs.pending_user_source = None
                 # Persist any partial assistant text that was streamed before cancel (#893).
                 # Preserving partial content means the user sees what the agent had
                 # produced rather than losing it entirely.  The marker is _partial=True

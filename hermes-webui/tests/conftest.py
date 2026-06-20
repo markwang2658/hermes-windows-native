@@ -1066,8 +1066,26 @@ def cleanup_test_sessions():
     Yields a list for tests to register created session IDs.
     Deletes all registered sessions after each test.
     Resets last_workspace to the test workspace to prevent state bleed.
+    Resets show_cli_sessions to its default (off) so a test that toggles it
+    on can't leak that setting into a sibling test under shard ordering — the
+    root cause behind the intermittent gateway_sync StopIteration flake, where a
+    session was occasionally absent from /api/sessions because show_cli_sessions
+    was left in an unexpected state by a prior test in the same shard.
     """
     created: list[str] = []
+    # Defense-in-depth: reset the CLI-session visibility setting to its default
+    # BEFORE the test runs too, not only in teardown. Teardown-only reset relies
+    # on every sibling test being wrapped by this fixture AND on its teardown
+    # actually completing; a pre-test reset guarantees each test starts from a
+    # known visibility state regardless of what a prior test left behind. The
+    # primary root-cause fix for the gateway_sync row-absence flake is the
+    # commit-reliable state.db content fingerprint in the cache keys
+    # (api/models.py _sqlite_content_fingerprint) — this pre-reset is belt-and-
+    # suspenders against setting bleed under shard ordering.
+    try:
+        _post(TEST_BASE, "/api/settings", {"show_cli_sessions": False})
+    except Exception:
+        pass
     yield created
 
     for sid in created:
@@ -1084,6 +1102,13 @@ def cleanup_test_sessions():
     try:
         last_ws_file = TEST_STATE_DIR / "last_workspace.txt"
         last_ws_file.write_text(str(TEST_WORKSPACE), encoding='utf-8')
+    except Exception:
+        pass
+
+    # Reset the CLI-session visibility setting to its default so it never bleeds
+    # across tests (33 gateway_sync tests flip it on; only ~30 reset it).
+    try:
+        _post(TEST_BASE, "/api/settings", {"show_cli_sessions": False})
     except Exception:
         pass
 

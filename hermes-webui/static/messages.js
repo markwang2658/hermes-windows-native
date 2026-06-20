@@ -150,6 +150,8 @@ if(_msgEl) _msgEl.addEventListener('blur', ()=>{ if('speechSynthesis' in window 
 
 let _selectedTextReplyBtn=null;
 let _selectedTextReplyText='';
+let _pendingSelections=[];  // [{id, name, text}] — named context blocks
+let _selectionIdCounter=0;
 let _selectedTextReplyRaf=0;
 const _persistentStateToastSeen=new Set();
 const _thinkPairs=[
@@ -710,6 +712,71 @@ document.addEventListener('click',(e)=>{
     if(btn)btn.setAttribute('aria-expanded','false');
   }
 },{capture:false});
+function _addNamedContextBlock(text){
+  const id='ctx-'+(++_selectionIdCounter);
+  const name=(_selectedTextReplyT('context_block_name_default','Context'))+' '+_selectionIdCounter;
+  _pendingSelections.push({id, name, text});
+  _renderSelectionChips();
+  return id;
+}
+
+function _removeNamedContextBlock(id){
+  _pendingSelections=_pendingSelections.filter(s=>s.id!==id);
+  _renderSelectionChips();
+}
+
+function _clearPendingSelections(){
+  if(!_pendingSelections.length)return false;
+  _pendingSelections=[];
+  _renderSelectionChips();
+  return true;
+}
+if(typeof window!=='undefined') window._clearPendingSelections=_clearPendingSelections;
+
+function _renderSelectionChips(){
+  const wrap=document.getElementById('composerSelectionChips');
+  if(!wrap)return;
+  wrap.innerHTML='';
+  wrap.hidden=!_pendingSelections.length;
+  _pendingSelections.forEach(s=>{
+    const chip=document.createElement('span');
+    chip.className='chip selection-chip';
+    chip.dataset.selectionId=s.id;
+    chip.innerHTML=`<span class="selection-chip-name" title="${esc(s.text)}">${esc(s.name)}</span>`+
+      `<button type="button" class="selection-chip-remove" aria-label="Remove context block" onclick="_removeNamedContextBlock('${s.id}')">&#x2715;</button>`;
+    chip.addEventListener('dblclick',()=>_editSelectionChipName(s.id,chip));
+    wrap.appendChild(chip);
+  });
+}
+
+function _editSelectionChipName(id,chip){
+  const s=_pendingSelections.find(x=>x.id===id);
+  if(!s)return;
+  const nameEl=chip.querySelector('.selection-chip-name');
+  const inp=document.createElement('input');
+  inp.type='text';inp.value=s.name;inp.className='selection-chip-edit';
+  nameEl.replaceWith(inp);
+  inp.focus();inp.select();
+  let done=false;
+  const commit=()=>{ if(done)return; done=true; s.name=inp.value.trim()||s.name; _renderSelectionChips(); };
+  const cancel=()=>{ if(done)return; done=true; _renderSelectionChips(); };
+  inp.addEventListener('blur',commit);
+  inp.addEventListener('keydown',e=>{ if(e.key==='Enter'){e.preventDefault();commit();} if(e.key==='Escape'){cancel();} });
+}
+
+function _flushSelectionBlocksToComposer(){
+  if(!_pendingSelections.length)return;
+  const composer=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
+  if(!composer)return;
+  const blocks=_pendingSelections.map(s=>`**${s.name}:**\n${_formatSelectedTextReplyQuote(s.text)}`).join('\n\n');
+  const current=String(composer.value||'');
+  composer.value=current.trim()?`${current.replace(/\s+$/,'')}\n\n${blocks}\n\n`:`${blocks}\n\n`;
+  _clearPendingSelections();
+  composer.focus();
+  try{ composer.setSelectionRange(composer.value.length, composer.value.length); }catch(_e){}
+  composer.dispatchEvent(new Event('input',{bubbles:true}));
+  if(typeof autoResize==='function') autoResize();
+}
 
 function _selectedTextReplyButton(){
   if(_selectedTextReplyBtn)return _selectedTextReplyBtn;
@@ -726,7 +793,8 @@ function _selectedTextReplyButton(){
   btn.addEventListener('mousedown', e=>e.preventDefault());
   btn.addEventListener('click', e=>{
     e.preventDefault();
-    if(_appendSelectedTextReplyToComposer(_selectedTextReplyText)){
+    if(_selectedTextReplyText){
+      _addNamedContextBlock(_selectedTextReplyText);
       _hideSelectedTextReplyButton();
       const selection=window.getSelection&&window.getSelection();
       if(selection&&selection.removeAllRanges)selection.removeAllRanges();
@@ -830,6 +898,16 @@ function _runOptionalPreStartUiStep(label, fn){
   }
 }
 
+function _runOptionalPostStartUiStep(label, fn){
+  try{
+    return typeof fn==='function'?fn():undefined;
+  }catch(e){
+    const message=e&&e.message?e.message:String(e||'unknown error');
+    try{console.warn('[webui] optional post-start UI step failed', label, message);}catch(_){ }
+    return undefined;
+  }
+}
+
 function _sessionTitleLooksDefaultOrProvisional(titleText, provisionalText){
   const title=String(titleText||'').replace(/\s+/g,' ').trim();
   if(!title||title==='Untitled'||title==='New Chat')return true;
@@ -872,6 +950,7 @@ function applySessionTitleUpdate(sid, titleText, options={}){
 }
 
 async function send(){
+  _flushSelectionBlocksToComposer();
   // Reject concurrent invocations early — before any await yields control.
   // If a send is already in-flight (e.g. queue drain), re-queue the message
   // instead of silently dropping it.
@@ -1179,8 +1258,12 @@ async function send(){
 
   // Start the agent via POST, get a stream_id back
   let streamId;
+  let postStartData;
+  let modelStateForPostStart;
+  let explicitPickForPostStart;
   try{
     const _modelState=_chatPayloadModelState();
+    modelStateForPostStart=_modelState;
     const _pendingPick=(typeof _readPendingSessionModel==='function')
       ? _readPendingSessionModel(activeSid)
       : null;
@@ -1193,6 +1276,7 @@ async function send(){
     // once read so a later send of an unchanged dropdown isn't treated as an explicit
     // pick. (#3739/#3737, Codex catch)
     if(_explicitPick && typeof _clearPendingSessionModel==='function') _clearPendingSessionModel(activeSid);
+    explicitPickForPostStart=_explicitPick;
     const startData=await api('/api/chat/start',{method:'POST',body:JSON.stringify({
       session_id:activeSid,message:msgText,
       // S.session.model remains authoritative; the helper only resolves a
@@ -1203,63 +1287,7 @@ async function send(){
       explicit_model_pick:_explicitPick||undefined,
       attachments:uploaded.length?uploaded:undefined
     })});
-
-    if(startData.title) applySessionTitleUpdate(activeSid, startData.title, {provisionalText:displayText.slice(0,64), rememberProvisional:true});
-
-    if(startData.effective_model && S.session){
-      const _sentModel=_modelState.model;
-      if(_explicitPick && _sentModel && startData.effective_model!==_sentModel && typeof showToast==='function'){
-        showToast('Model '+_sentModel+' changed to '+startData.effective_model+' — profile provider mismatch', 5000);
-      }
-      S.session.model=startData.effective_model;
-      S.session.model_provider=startData.effective_model_provider||S.session.model_provider||null;
-      localStorage.setItem('hermes-webui-model', startData.effective_model);
-      if(typeof _writePersistedModelState==='function') _writePersistedModelState(startData.effective_model,S.session.model_provider||null);
-      if($('modelSelect')) _applyModelToDropdown(startData.effective_model, $('modelSelect'),S.session.model_provider||null);
-      if(typeof syncTopbar==='function') syncTopbar();
-    }else if(startData.effective_model_provider && S.session){
-      S.session.model_provider=startData.effective_model_provider;
-      if(typeof _writePersistedModelState==='function') _writePersistedModelState(S.session.model||'',S.session.model_provider||null);
-      if($('modelSelect')&&typeof _applyModelToDropdown==='function') _applyModelToDropdown(S.session.model||'', $('modelSelect'), S.session.model_provider||null);
-      if(typeof syncModelChip==='function') syncModelChip();
-      if(typeof syncTopbar==='function') syncTopbar();
-    }
-    streamId=startData.stream_id;
-    S.activeStreamId = streamId;
-    if(typeof appendThinking==='function') appendThinking('',{pending:true});
-    // setBusy(true) already ran with activeStreamId=null; refresh now that we
-    // have a stream id so the primary button can switch to Stop (see getComposerPrimaryAction).
-    if(typeof updateSendBtn==='function') updateSendBtn();
-    if(S.session&&typeof startData.pending_started_at==='number'){
-      S.session.pending_started_at=startData.pending_started_at;
-    }
-    if(S.session&&S.session.session_id===activeSid){
-      S.session.active_stream_id = streamId;
-    }
-    if(S.session&&S.session.session_id===activeSid&&typeof showLiveRunStatus==='function'){
-      const _startedAt=typeof startData.pending_started_at==='number'
-        ? startData.pending_started_at
-        : (S.session.pending_started_at||Date.now()/1000);
-      showLiveRunStatus(activeSid,{startedAt:_startedAt});
-    }
-    if(typeof upsertActiveSessionForLocalTurn==='function'){
-      // Third optimistic pass: stream_id is now known, so the row can reconcile
-      // against real active-stream metadata before the background refresh lands.
-      upsertActiveSessionForLocalTurn({title:S.session&&S.session.title||displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now()});
-    }
-    if(!INFLIGHT[activeSid]){
-      INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
-    }
-    const currentInflight=INFLIGHT[activeSid];
-    markInflight(activeSid, streamId);
-    if(typeof saveInflightState==='function'){
-      saveInflightState(activeSid,{streamId,messages:currentInflight.messages||optimisticMessages,uploaded:uploadedNames,toolCalls:currentInflight.toolCalls||[]});
-    }
-    // Refresh session list so background streaming indicators appear immediately for the
-    // session that was just started and any others that may already be running.
-    if(typeof renderSessionList === 'function') {
-      void renderSessionList();
-    }
+    postStartData = startData;
   }catch(e){
     const errMsg=String((e&&e.message)||'');
     // If /api/chat/start returns 404, the session was deleted server-side
@@ -1323,6 +1351,70 @@ async function send(){
     return;
   }
 
+  const startData = postStartData || {};
+  streamId = postStartData ? postStartData.stream_id : null;
+  S.activeStreamId = streamId;
+  // setBusy(true) already ran with activeStreamId=null; refresh now that we
+  // have a stream id so the primary button can switch to Stop (see
+  // getComposerPrimaryAction).
+  if(typeof updateSendBtn==='function') updateSendBtn();
+  _runOptionalPostStartUiStep('post-start ui/bookkeeping', ()=>{
+    const _modelState=modelStateForPostStart || _chatPayloadModelState();
+    const _explicitPick=explicitPickForPostStart;
+    if(startData&&startData.title) applySessionTitleUpdate(activeSid, startData.title, {provisionalText:displayText.slice(0,64), rememberProvisional:true});
+
+    if(startData&&startData.effective_model && S.session){
+      const _sentModel=_modelState&&_modelState.model;
+      if(_explicitPick && _sentModel && startData.effective_model!==_sentModel && typeof showToast==='function'){
+        showToast('Model '+_sentModel+' changed to '+startData.effective_model+' — profile provider mismatch', 5000);
+      }
+      S.session.model=startData.effective_model;
+      S.session.model_provider=startData.effective_model_provider||S.session.model_provider||null;
+      localStorage.setItem('hermes-webui-model', startData.effective_model);
+      if(typeof _writePersistedModelState==='function') _writePersistedModelState(startData.effective_model,S.session.model_provider||null);
+      if($('modelSelect')) _applyModelToDropdown(startData.effective_model, $('modelSelect'),S.session.model_provider||null);
+      if(typeof syncTopbar==='function') syncTopbar();
+    }else if(startData&&startData.effective_model_provider && S.session){
+      S.session.model_provider=startData.effective_model_provider;
+      if(typeof _writePersistedModelState==='function') _writePersistedModelState(S.session.model||'',S.session.model_provider||null);
+      if($('modelSelect')&&typeof _applyModelToDropdown==='function') _applyModelToDropdown(S.session.model||'', $('modelSelect'), S.session.model_provider||null);
+      if(typeof syncModelChip==='function') syncModelChip();
+      if(typeof syncTopbar==='function') syncTopbar();
+    }
+
+    if(typeof appendThinking==='function') appendThinking('',{pending:true});
+    if(S.session&&typeof startData.pending_started_at==='number'){
+      S.session.pending_started_at=startData.pending_started_at;
+    }
+    if(S.session&&S.session.session_id===activeSid){
+      S.session.active_stream_id = streamId;
+    }
+    if(S.session&&S.session.session_id===activeSid&&typeof showLiveRunStatus==='function'){
+      const _startedAt=typeof startData?.pending_started_at==='number'
+        ? startData.pending_started_at
+        : (S.session.pending_started_at||Date.now()/1000);
+      showLiveRunStatus(activeSid,{startedAt:_startedAt});
+    }
+    if(typeof upsertActiveSessionForLocalTurn==='function'){
+      // Third optimistic pass: stream_id is now known, so the row can reconcile
+      // against real active-stream metadata before the background refresh lands.
+      upsertActiveSessionForLocalTurn({title:S.session&&S.session.title||displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now()});
+    }
+    if(!INFLIGHT[activeSid]){
+      INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
+    }
+    const currentInflight=INFLIGHT[activeSid];
+    markInflight(activeSid, streamId);
+    if(typeof saveInflightState==='function'){
+      saveInflightState(activeSid,{streamId,messages:currentInflight.messages||optimisticMessages,uploaded:uploadedNames,toolCalls:currentInflight.toolCalls||[]});
+    }
+    // Refresh session list so background streaming indicators appear immediately for the
+    // session that was just started and any others that may already be running.
+    if(typeof renderSessionList === 'function') {
+      void renderSessionList();
+    }
+  });
+
   // Open SSE stream and render tokens live
   attachLiveStream(activeSid, streamId, uploadedNames);
 
@@ -1331,30 +1423,40 @@ async function send(){
 
 const LIVE_STREAMS={};
 
-function _markStreamSourceIntentional(source, reason){
-  if(!source) return;
-  try{
-    source._intentionalClose=true;
-    source._intentionalCloseReason=reason||'intentional';
-  }catch(_){}
+// #4416: track whether the tab was hidden at ANY point during a live stream, so
+// the response-complete notification fires for a backgrounded tab even when
+// Chromium throttles the background-tab SSE and delivers the `done` event LATE
+// (after the user returns, when document.hidden already reads false). Each entry
+// is STREAM-OWNED ({streamId, wasHidden}) so a stale entry left by a non-`done`
+// terminal path (apperror/cancel/stream-error/reconnect-no-active) can never be
+// mis-attributed to a later stream for the same session id — a reconnect only
+// keeps the prior state when the streamId matches. One idempotent
+// visibilitychange listener (never leaks) flips wasHidden on all active entries.
+const _STREAM_WAS_HIDDEN={};
+let _streamHiddenTrackerBound=false;
+function _bindStreamHiddenTracker(){
+  if(_streamHiddenTrackerBound||typeof document==='undefined'||typeof document.addEventListener!=='function') return;
+  _streamHiddenTrackerBound=true;
+  document.addEventListener('visibilitychange',()=>{
+    if(document.hidden){ for(const k in _STREAM_WAS_HIDDEN){ const e=_STREAM_WAS_HIDDEN[k]; if(e) e.wasHidden=true; } }
+  });
+}
+function _clearStreamHidden(sid, streamId){
+  // Clear only when we own the current stream's entry (or unconditionally when
+  // streamId is omitted). Prevents a terminal path for an old stream from wiping
+  // a newer stream's tracker.
+  if(!sid) return;
+  const e=_STREAM_WAS_HIDDEN[sid];
+  if(!e) return;
+  if(streamId&&e.streamId&&e.streamId!==streamId) return;
+  delete _STREAM_WAS_HIDDEN[sid];
 }
 
-function _closeStreamSourceIntentionally(source, reason){
-  if(!source) return;
-  _markStreamSourceIntentional(source, reason);
-  try{source.close();}catch(_){ }
-}
-
-function _isIntentionalStreamSourceClose(source){
-  return !!(source&&source._intentionalClose);
-}
-
-function closeLiveStream(sessionId, streamId, source, reason='live-stream-close', options={}){
+function closeLiveStream(sessionId, streamId, source){
   const live=LIVE_STREAMS[sessionId];
   if(!live) return;
   if(streamId&&live.streamId!==streamId) return;
   if(source&&live.source!==source) return;
-  const closeTransport = options.closeTransport !== false;
   // Snapshot the current live-turn DOM BEFORE tearing the stream down. The
   // per-event snapshot (snapshotLiveTurn) only fires on content/tool_complete
   // SSE events, so switching away during a quiet window (mid tool-exec, silent
@@ -1368,8 +1470,7 @@ function closeLiveStream(sessionId, streamId, source, reason='live-stream-close'
   // reattach path will rebuild it from INFLIGHT/server state if the user returns.
   if(typeof _clearLiveRunStatusTimer==='function') _clearLiveRunStatusTimer(sessionId);
   if(typeof hideLiveRunStatus==='function') hideLiveRunStatus(sessionId);
-  if(closeTransport) _closeStreamSourceIntentionally(live.source, reason);
-  else _markStreamSourceIntentional(live.source, reason);
+  try{if(live.source&&live.source.readyState!==2)live.source.close();}catch(_){ }
   delete LIVE_STREAMS[sessionId];
   // closeLiveStream() is called during session-switch teardown for any session
   // the user is no longer viewing. The stream is still active on the server,
@@ -1417,6 +1518,18 @@ function closeOtherLiveStreams(activeSid){
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
   const reconnecting=!!options.reconnecting;
+  // #4416: start (or, on reconnect for the SAME stream, keep) tracking whether
+  // the tab was hidden during this stream so the done-notification fires for a
+  // backgrounded tab. A reconnect with a different streamId re-seeds (the old
+  // entry belonged to a prior stream).
+  _bindStreamHiddenTracker();
+  {
+    const _prev=_STREAM_WAS_HIDDEN[activeSid];
+    const _keep=reconnecting&&_prev&&_prev.streamId===streamId;
+    if(!_keep){
+      _STREAM_WAS_HIDDEN[activeSid]={streamId,wasHidden:(typeof document!=='undefined'&&!!document.hidden)};
+    }
+  }
   if(!INFLIGHT[activeSid]) INFLIGHT[activeSid]={messages:[...S.messages],uploaded:[...uploaded],toolCalls:[]};
   else {
     if(uploaded.length) INFLIGHT[activeSid].uploaded=[...uploaded];
@@ -1644,8 +1757,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(_persistTimer) return;
     _persistTimer=setTimeout(()=>{_persistTimer=null;persistInflightState();},2000);
   }
-  function _closeSource(source, reason='live-stream-close', options={}){
-    closeLiveStream(activeSid, streamId, source, reason, options);
+  function _closeSource(source){
+    closeLiveStream(activeSid, streamId, source);
   }
   function _clearStreamEndRecovery(){
     if(_streamEndRecoveryTimer){
@@ -1684,6 +1797,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _smdEndParser();
     if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
     _clearOwnerInflightState();
+    _clearStreamHidden(activeSid, streamId);  // #4416: terminal path, drop hidden tracker
     _flushReasoningToAnchor();
     _scheduleAnchorRegistryCleanup();
     _clearApprovalForOwner();
@@ -2170,7 +2284,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   // Allowed URL schemes for anchors and images rendered from agent-streamed markdown.
   // Raw file:// anchors are rewritten to /api/media before the user can click them.
-  const _SMD_SAFE_URL_RE=/^(?:https?:|mailto:|tel:|\/|#|\?|\.|api|session\/)/i;
+  const _SMD_SAFE_URL_RE=/^(?:https?:|mailto:|tel:|message:|\/|#|\?|\.|api|session\/)/i;
   const _SMD_SAFE_IMG_URL_RE=/^(?:https?:|mailto:|tel:|\/|#|\?|\.)/i;
   function _smdLinkHref(raw){
     const href=String(raw||'');
@@ -2875,7 +2989,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _wireSSE(source){
     const existingLive=LIVE_STREAMS[activeSid];
     if(existingLive&&existingLive.source&&existingLive.source!==source){
-      _closeStreamSourceIntentionally(existingLive.source,'chat-stream-replaced');
+      try{if(existingLive.source.readyState!==2)existingLive.source.close();}catch(_){ }
     }
     LIVE_STREAMS[activeSid]={streamId,source};
 
@@ -3460,7 +3574,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         renderSessionList();
         _setActivePaneIdleIfOwner();
         playNotificationSound();
-        sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished',{sid:activeSid});
+        // #4416: notify if the tab was hidden at ANY point during this stream
+        // (not just at done-receive time, which a throttled background-tab SSE
+        // delivers late — after the user returns and document.hidden is false).
+        // If the user watched the whole stream, _wasEverHidden stays false and
+        // the notification is suppressed (matches Slack/Discord/Gmail/Claude).
+        const _hiddenEntry=_STREAM_WAS_HIDDEN[activeSid];
+        const _wasEverHidden=!!(_hiddenEntry&&_hiddenEntry.wasHidden);
+        _clearStreamHidden(activeSid, streamId);
+        sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished',{forceHidden:_wasEverHidden,sid:activeSid});
       };
       if(_shouldUseStreamFade()&&assistantBody){
         _cancelAnimationFramePendingStreamRender();
@@ -3472,7 +3594,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('stream_end',async e=>{
       if(_streamFinalized){
-        _closeSource(source,'chat-stream-terminal-settled',{closeTransport:false});
+        _closeSource(source);
         return;
       }
       _clearStreamEndRecovery();
@@ -3623,8 +3745,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       // Application-level error sent explicitly by the server (rate limit, crash, etc.)
       // This is distinct from the SSE network 'error' event below.
-      _closeStreamSourceIntentionally(source,'chat-stream-apperror');
+      try{if(source&&source.readyState!==2)source.close();}catch(_){ }
       _clearOwnerInflightState();
+      _clearStreamHidden(activeSid, streamId);  // #4416: terminal path, drop hidden tracker
       _clearApprovalForOwner();
       _clearClarifyForOwner('terminal');
       let d={};
@@ -3710,6 +3833,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!S.session||S.session.session_id!==activeSid) return;
       try{
         const d=JSON.parse(e.data);
+        if(d.type==='approval_gateway_unsupported'){
+          if(typeof showToast==='function') showToast(typeof t==='function'?t('approval_gateway_unsupported_label'):'Approvals not supported',4000,'warning');
+          return;
+        }
         // Show as a small inline notice, not a full error
         setComposerStatus(`${d.message||'Warning'}`);
         // If it's a fallback notice, show it briefly then clear
@@ -3721,26 +3848,22 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(_bailOutOfTerminalEventsFromStaleStream(source) && !_streamFinalized){
         return;
       }
-      if(_isIntentionalStreamSourceClose(source)){
-        _closeSource(source,'chat-stream-intentional-error');
-        return;
-      }
       if(_terminalStateReached || _streamFinalized){
-        _closeSource(source,'chat-stream-terminal-error');
+        _closeSource(source);
         return;
       }
       // #3885: if a stream_end recovery is in flight, don't start a competing
       // reconnect — recovery polls server state and owns the terminal decision
       // (else its exhaustion could mute a freshly reconnected stream). Opus stage-LK.
       if(_pendingStreamEndRecovery){
-        _closeSource(source,'chat-stream-recovery-pending');
+        _closeSource(source);
         return;
       }
       if(typeof recordClientSSEError==='function') recordClientSSEError('chat-response',{ready_state:source?source.readyState:null,session_id:activeSid,stream_id:streamId,reason:'chat EventSource.onerror'});
-      _closeStreamSourceIntentionally(source,'chat-stream-recovering');
+      try{if(source&&source.readyState!==2)source.close();}catch(_){ }
       if(_deferStreamErrorIfOffline()) return;
       if(_deferStreamErrorIfPageHidden(source)) return;
-      _closeSource(source,'chat-stream-error');
+      _closeSource(source);
       // If the user has switched to a different session, don't attempt to
       // reconnect — the old stream's EventSource was closed intentionally
       // during session switch and reconnecting would leak a background stream.
@@ -3795,8 +3918,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _streamFadeCleanupReduceMotionListener();
       _smdEndParser();
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
-      _closeStreamSourceIntentionally(source,'chat-stream-cancel');
+      try{if(source&&source.readyState!==2)source.close();}catch(_){ }
       _clearOwnerInflightState();
+      _clearStreamHidden(activeSid, streamId);  // #4416: terminal path, drop hidden tracker
       _clearApprovalForOwner();
       _clearClarifyForOwner('cancelled');
       let _cancelData={};
@@ -3890,7 +4014,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   async function _restoreSettledSession(source, options=null){
     const returnStatus=!!(options&&options.status);
     if(_isActiveSession() && S.activeStreamId!==streamId){
-      _closeSource(source,'chat-stream-restored',{closeTransport:false});
+      _closeSource(source);
       return returnStatus?'stale':false;
     }
     try{
@@ -3980,7 +4104,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _streamFadeCleanupReduceMotionListener();
     if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
     _clearOwnerInflightState();
-    _closeSource(source,'chat-stream-error-finalized',{closeTransport:false});
+    _closeSource(source);
     _clearApprovalForOwner();
     _clearClarifyForOwner('terminal');
     if(S.session&&S.session.session_id===activeSid){
@@ -4400,7 +4524,7 @@ function stopApprovalPollingForSession(sid) {
 
 function stopApprovalPolling() {
   if (_approvalPollTimer) { clearInterval(_approvalPollTimer); _approvalPollTimer = null; }
-  if (_approvalEventSource) { try { _approvalEventSource.close(); } catch(_){} _approvalEventSource = null; }
+  if (_approvalEventSource) { try { if(_approvalEventSource.readyState!==2)_approvalEventSource.close(); } catch(_){} _approvalEventSource = null; }
   if (_approvalSSEHealthTimer) { clearInterval(_approvalSSEHealthTimer); _approvalSSEHealthTimer = null; }
   _approvalFallbackPollInFlight = false;
   _approvalPollingSessionId = null;
@@ -4430,6 +4554,30 @@ function startSessionStream(sid) {
   if (_sessionStreamSessionId === sid && _sessionEventSource) return;
   stopSessionStream();
   _sessionStreamSessionId = sid;
+  // Visibility hook (install once) — mirror ensureSessionEventsSSE() pattern.
+  // Capture the active session id into a dedicated var BEFORE closing, because
+  // stopSessionStream() nulls _sessionStreamSessionId — so the reopen path can't
+  // rely on it (that was the bug: the stream never reopened on tab re-show).
+  if (typeof document !== 'undefined' && !document._hermesSessionStreamVisibilityHook) {
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        _sessionStreamHiddenSid = _sessionStreamSessionId;
+        stopSessionStream();
+      } else if (_sessionStreamHiddenSid) {
+        const resumeSid = _sessionStreamHiddenSid;
+        _sessionStreamHiddenSid = null;
+        void startSessionStream(resumeSid);
+      }
+    });
+    document._hermesSessionStreamVisibilityHook = true;
+  }
+  // Don't open when tab is hidden — saves connection pool slots. Preserve the
+  // pending session id so the visibility handler reopens it on re-show (a session
+  // loaded/restored while the tab is already hidden must still reattach).
+  if (typeof document !== 'undefined' && document.hidden) {
+    _sessionStreamHiddenSid = sid;
+    return;
+  }
   try {
     const es = new EventSource(_apiUrl('api/session/stream?session_id=' + encodeURIComponent(sid)));
     _sessionEventSource = es;
@@ -4512,6 +4660,7 @@ function startSessionStream(sid) {
         // it in the interim (stale onerror from a superseded stream), in
         // which case we must not stomp the live one.
         if (_sessionEventSource === es) {
+          try { if(es.readyState!==2)es.close(); } catch (_) {}
           _sessionEventSource = null;
         }
         _sessionStreamReconnectTimer = setTimeout(() => {
@@ -4530,7 +4679,7 @@ function startSessionStream(sid) {
 function stopSessionStream() {
   if (_sessionStreamReconnectTimer) { clearTimeout(_sessionStreamReconnectTimer); _sessionStreamReconnectTimer = null; }
   if (_sessionEventSource) {
-    try { _sessionEventSource.close(); } catch(_){}
+    try { if(_sessionEventSource.readyState!==2)_sessionEventSource.close(); } catch(_){}
     _sessionEventSource = null;
   }
   _sessionStreamSessionId = null;
@@ -5142,7 +5291,7 @@ function stopClarifyPollingForSession(sid) {
 }
 
 function stopClarifyPolling() {
-  if (_clarifyEventSource) { try { _clarifyEventSource.close(); } catch(_){} _clarifyEventSource = null; }
+  if (_clarifyEventSource) { try { if(_clarifyEventSource.readyState!==2)_clarifyEventSource.close(); } catch(_){} _clarifyEventSource = null; }
   if (_clarifyFallbackTimer) { clearInterval(_clarifyFallbackTimer); _clarifyFallbackTimer = null; }
   if (_clarifyHealthTimer) { clearInterval(_clarifyHealthTimer); _clarifyHealthTimer = null; }
   _clarifyFallbackPollInFlight = false;
@@ -5254,7 +5403,15 @@ function requestNotificationPermission(){
 }
 function sendBrowserNotification(title,body,options={}){
   const force=!!(options&&options.force);
-  if(!force&&(!window._notificationsEnabled||!document.hidden)) return;
+  // #4416: `forceHidden` means the caller already determined the tab was hidden
+  // during the relevant window (e.g. a stream that ran while backgrounded), so
+  // the live `document.hidden` visibility gate — which a late, throttled SSE
+  // makes unreliable — should be treated as satisfied. The user's
+  // notifications-enabled SETTING is still honored (unlike `force`, which is the
+  // explicit "Send test" override); only the visibility gate is bypassed.
+  const forceHidden=!!(options&&options.forceHidden);
+  if(!force&&!window._notificationsEnabled) return;
+  if(!force&&!forceHidden&&!document.hidden) return;
   if(!('Notification' in window)) return;
   if(Notification.permission==='granted'){
     _showPwaNotification(title,body,options).catch(()=>{try{new Notification(title||assistantDisplayName(),_notificationOptions(body,options));}catch(_err){}});

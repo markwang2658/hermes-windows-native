@@ -693,7 +693,8 @@ def test_default_title_cli_compression_chain_is_kept_by_lineage():
 
         assert 'cli_default_compress_tip_001' in ids
         assert 'cli_default_compress_root_001' not in ids
-        tip = next(s for s in data.get('sessions', []) if s.get('session_id') == 'cli_default_compress_tip_001')
+        tip = next((s for s in data.get('sessions', []) if s.get('session_id') == 'cli_default_compress_tip_001'), None)
+        assert tip is not None, "compression tip session missing from /api/sessions (test-isolation? check show_cli_sessions + session presence)"
         assert tip.get('_compression_segment_count') == 2
         assert tip.get('_lineage_root_id') == 'cli_default_compress_root_001'
     finally:
@@ -779,7 +780,8 @@ def test_agent_session_limit_applies_after_compression_projection():
         assert chain_ids[-1] in ids
         assert standalone_id in ids
         assert not any(sid in ids for sid in chain_ids[:-1])
-        chain = next(row for row in rows if row.get('id') == chain_ids[-1])
+        chain = next((row for row in rows if row.get('id') == chain_ids[-1]), None)
+        assert chain is not None, "limit-chain tip row missing from projected rows (test-isolation?)"
         assert chain.get('title') == 'Limit Chain #1'
         assert chain.get('_lineage_root_id') == chain_ids[0]
         assert chain.get('_compression_segment_count') == len(chain_ids)
@@ -879,7 +881,8 @@ def test_compression_chain_bubbles_to_top_by_tip_activity():
             f"not the tip's recent value."
         )
 
-        tip_row = next(r for r in rows if r['id'] == 'bubble_tip_001')
+        tip_row = next((r for r in rows if r['id'] == 'bubble_tip_001'), None)
+        assert tip_row is not None, "bubble tip row missing from projected rows (test-isolation?)"
         assert abs(tip_row['last_activity'] - tip_latest_msg) < 0.01, (
             f"Projected tip's last_activity must equal the tip's most recent "
             f"message timestamp ({tip_latest_msg}), not the root's "
@@ -1341,7 +1344,8 @@ def test_sessions_response_backfills_imported_messaging_source_metadata(cleanup_
 
         data, status = get('/api/sessions')
         assert status == 200
-        session = next(item for item in data.get('sessions', []) if item.get('session_id') == sid)
+        session = next((item for item in data.get('sessions', []) if item.get('session_id') == sid), None)
+        assert session is not None, f"{sid} missing from /api/sessions — show_cli_sessions not applied or session hidden (test-isolation)"
         assert session.get('source_tag') == 'weixin'
         assert session.get('raw_source') == 'weixin'
         assert session.get('session_source') == 'messaging'
@@ -2093,7 +2097,8 @@ def test_sessions_prefers_state_db_metadata_for_messaging_overlap(cleanup_test_s
         post('/api/settings', {'show_cli_sessions': True})
         data, status = get('/api/sessions')
         assert status == 200, data
-        session = next(item for item in data.get('sessions', []) if item.get('session_id') == sid)
+        session = next((item for item in data.get('sessions', []) if item.get('session_id') == sid), None)
+        assert session is not None, f"{sid} missing from /api/sessions (test-isolation)"
         assert session.get('message_count') == len(rows)
         expected_updated = max(ts for _, _, ts in rows)
         assert abs(float(session.get('updated_at') or 0) - expected_updated) < 1.0

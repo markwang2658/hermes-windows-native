@@ -138,7 +138,7 @@ def test_backend_frontend_parity_complex_aggregator_proxy():
         tmp = f.name
     try:
         result = subprocess.run(
-            ["node", tmp], capture_output=True, text=True, timeout=10
+            ["node", tmp], capture_output=True, text=True, timeout=30
         )
         assert result.returncode == 0, f"JS execution failed: {result.stderr}"
         js_pairs = json.loads(result.stdout.strip())

@@ -1,4 +1,4 @@
-﻿"""Tests for gateway weak credential rejection at startup.
+"""Tests for gateway weak credential rejection at startup.
 
 Ported from openclaw/openclaw#64586: rejects known-weak placeholder
 tokens at gateway startup instead of letting them silently fail
@@ -67,10 +67,10 @@ class TestPlatformTokenPlaceholderGuard:
             _validate_and_return(config)
         assert config.platforms[Platform.MATRIX].enabled is False
 
-    def test_accepts_non_placeholder_token(self, caplog):
-        """Any non-placeholder token should pass placeholder validation."""
+    def test_accepts_real_token(self, caplog):
+        """A real-looking bot token should pass validation."""
         config = _make_gateway_config(
-            Platform.TELEGRAM, "telegram-safe-unit-test-token"
+            Platform.TELEGRAM, "7123456789:AAHdqTcvCH1vGWJxfSeOfSAs0K5PALDsaw"
         )
         with caplog.at_level(logging.ERROR):
             _validate_and_return(config)

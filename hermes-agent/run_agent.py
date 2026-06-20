@@ -45,7 +45,7 @@ import tempfile
 import time
 import threading
 import uuid
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Callable
 # NOTE: `from openai import OpenAI` is deliberately NOT at module top — the
 # SDK pulls ~240 ms of imports. We expose `OpenAI` as a thin proxy object
 # that imports the SDK on first call/isinstance check. This preserves:
@@ -384,6 +384,7 @@ class AIAgent:
         status_callback: callable = None,
         notice_callback: callable = None,
         notice_clear_callback: callable = None,
+        event_callback: Optional[Callable[[str, dict], None]] = None,
         max_tokens: int = None,
         reasoning_config: Dict[str, Any] = None,
         service_tier: str = None,
@@ -458,6 +459,7 @@ class AIAgent:
             status_callback=status_callback,
             notice_callback=notice_callback,
             notice_clear_callback=notice_clear_callback,
+            event_callback=event_callback,
             max_tokens=max_tokens,
             reasoning_config=reasoning_config,
             service_tier=service_tier,
@@ -1470,16 +1472,29 @@ class AIAgent:
         that synthetic text leak into persisted transcripts or resumed session
         history. When an override is configured for the active turn, mutate the
         in-memory messages list in place so both persistence and returned
-        history stay clean.
+        history stay clean.  A paired timestamp override preserves the platform
+        event time as message metadata, rather than embedding it in content.
         """
         idx = getattr(self, "_persist_user_message_idx", None)
         override = getattr(self, "_persist_user_message_override", None)
-        if override is None or idx is None:
+        timestamp = getattr(self, "_persist_user_message_timestamp", None)
+        if idx is None or (override is None and timestamp is None):
             return
         if 0 <= idx < len(messages):
             msg = messages[idx]
             if isinstance(msg, dict) and msg.get("role") == "user":
-                msg["content"] = override
+                # Text-only call paths may pass a synthetic API-facing prompt
+                # and a cleaner transcript string separately. Multimodal
+                # turns, however, keep image/audio blocks in the live
+                # messages list that is still used for the API request after
+                # early crash-resilience persistence. Do not replace those
+                # blocks with the text-only persistence override before the
+                # model call is built. The paired timestamp override still
+                # applies — it is metadata, not content.
+                if override is not None and not isinstance(msg.get("content"), list):
+                    msg["content"] = override
+                if timestamp is not None:
+                    msg["timestamp"] = timestamp
 
     def _persist_session(self, messages: List[Dict], conversation_history: List[Dict] = None):
         """Save session state to both JSON log and SQLite on any exit path.
@@ -1637,6 +1652,7 @@ class AIAgent:
                     reasoning_details=msg.get("reasoning_details") if role == "assistant" else None,
                     codex_reasoning_items=msg.get("codex_reasoning_items") if role == "assistant" else None,
                     codex_message_items=msg.get("codex_message_items") if role == "assistant" else None,
+                    timestamp=msg.get("timestamp"),
                 )
                 flushed_ids.add(msg_id)
             self._last_flushed_db_idx = len(messages)
@@ -1825,6 +1841,35 @@ class AIAgent:
         return f"{detail}{hint}"
 
     @staticmethod
+    def _coerce_api_error_detail(value: Any) -> str:
+        """Return a display-safe string for structured provider error fields."""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dict):
+            for key in ("message", "detail", "error", "code", "type"):
+                nested = value.get(key)
+                if isinstance(nested, str) and nested.strip():
+                    return nested
+            for key in ("message", "detail", "error", "code", "type"):
+                if key in value:
+                    nested_detail = AIAgent._coerce_api_error_detail(value[key])
+                    if nested_detail:
+                        return nested_detail
+            try:
+                return json.dumps(value, ensure_ascii=False, sort_keys=True)
+            except TypeError:
+                return str(value)
+        if isinstance(value, (list, tuple)):
+            parts = [
+                AIAgent._coerce_api_error_detail(item)
+                for item in value
+            ]
+            return "; ".join(part for part in parts if part)
+        if value is None:
+            return ""
+        return str(value)
+
+    @staticmethod
     def _summarize_api_error(error: Exception) -> str:
         """Extract a human-readable one-liner from an API error.
 
@@ -1863,6 +1908,7 @@ class AIAgent:
             if msg:
                 status_code = getattr(error, "status_code", None)
                 prefix = f"HTTP {status_code}: " if status_code else ""
+                msg = AIAgent._coerce_api_error_detail(msg)
                 return AIAgent._decorate_xai_entitlement_error(f"{prefix}{msg[:300]}")
 
         # Fallback: truncate the raw string but give more room than 200 chars
@@ -4030,11 +4076,13 @@ class AIAgent:
         # Defensive: strip Responses-only kwargs that can leak in under an
         # api_mode-flip race (the Anthropic SDK raises a non-retryable
         # TypeError on them). See #31673.
-        from agent.anthropic_adapter import sanitize_anthropic_kwargs
-        sanitize_anthropic_kwargs(
-            api_kwargs, log_prefix=getattr(self, "log_prefix", "")
+        from agent.anthropic_adapter import create_anthropic_message
+        return create_anthropic_message(
+            self._anthropic_client,
+            api_kwargs,
+            log_prefix=getattr(self, "log_prefix", ""),
+            prefer_stream=not bool(getattr(self, "_disable_streaming", False)),
         )
-        return self._anthropic_client.messages.create(**api_kwargs)
 
     def _rebuild_anthropic_client(self) -> None:
         """Rebuild the Anthropic client after an interrupt or stale call.
@@ -5216,10 +5264,20 @@ class AIAgent:
         task_id: str = None,
         stream_callback: Optional[callable] = None,
         persist_user_message: Optional[str] = None,
+        persist_user_timestamp: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Forwarder — see ``agent.conversation_loop.run_conversation``."""
         from agent.conversation_loop import run_conversation
-        return run_conversation(self, user_message, system_message, conversation_history, task_id, stream_callback, persist_user_message)
+        return run_conversation(
+            self,
+            user_message,
+            system_message,
+            conversation_history,
+            task_id,
+            stream_callback,
+            persist_user_message,
+            persist_user_timestamp,
+        )
 
     def chat(self, message: str, stream_callback: Optional[callable] = None) -> str:
         """
