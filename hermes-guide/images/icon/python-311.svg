@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="32" viewBox="0 0 128 32" role="img" aria-label="Python 3.11+">
+  <rect width="128" height="32" rx="8" fill="#0f172a"/>
+  <rect x="10" y="8" width="12" height="8" rx="3" fill="#3776ab"/>
+  <rect x="10" y="16" width="12" height="8" rx="3" fill="#ffd43b"/>
+  <circle cx="18" cy="12" r="1" fill="#ffffff"/>
+  <circle cx="14" cy="20" r="1" fill="#ffffff"/>
+  <text x="30" y="21" font-family="Segoe UI, Arial, sans-serif" font-size="13" fill="#ffffff">Python 3.11+</text>
+</svg>
